@@ -16,4 +16,5 @@
     unreachable_pub
 )]
 
+#[allow(missing_docs)]
 pub mod parser;
