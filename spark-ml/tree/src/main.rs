@@ -25,6 +25,6 @@ fn main() {
 
     match SparkMLParser::parse(Rule::module, &input) {
         Ok(pairs) => println!("{}", parser_tree_as_string(pairs)),
-        Err(e) => println!("Error: {:?}", e),
+        Err(e) => println!("{}", e.renamed_rules(|r| format!("{:?}", r))),
     }
 }
