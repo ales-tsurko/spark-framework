@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "pest-tools",
+    "spark-app",
+    "spark-ml",
+    "spark-ml/tree", # a tool for the spark-ml's parser development
+]

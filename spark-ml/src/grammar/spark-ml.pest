@@ -1,0 +1,45 @@
+module = { SOI ~ statement* ~ EOI }
+
+statement = _{ "\n"* ~ (node | ext_resource | sub_resource | assignment) ~ "\n"* }
+ext_resource = { "ext" ~ STRING }
+sub_resource = { "sub" ~ node }
+assignment = { ID ~ "=" ~ "\n"* ~ value }
+
+node = !{ ID ~ "from" ~ ID ~ attributes? }
+attributes = { child_attr+ }
+parent_attr = { attribute ~ attributes }
+child_attr = ${ (COMMENT | "\n")+ ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute)? ~ DROP }
+attribute = !{ KEY ~ ":" ~ value | node }
+
+value = _{ list | node_anon | STRING | BOOL | NUMBER | expression }
+list = !{ "[" ~ "\n"* ~ value  ~ ("\n"* ~ "," ~ "\n"* ~ value ~ "\n"*)* ~ "]" }
+node_anon = !{ "from" ~ attributes }
+expression = _{ attr_access | call | node_path  }
+node_path = { PATH ~ ID ~ ("\n"* ~ "." ~ ID)* }
+attr_access = { ID ~ list_access* ~ ("\n"* ~ "." ~ call)+ }
+call = { (fn_call | ID) ~ list_access* }
+fn_call = { ID ~ ("(" ~ value* ~ ")") }
+list_access = { "[" ~ (NUMBER | call) ~ "]" }
+
+STRING           = ${ "\"" ~ STRING_INNER ~ "\"" }
+    STRING_INNER = { (!(NEWLINE | "\"") ~ ANY)* }
+BOOL             = { "true" | "false" }
+BOOL_OP          = { AND | OR | NOT | EQ | LT | GT | LT_EQ | GT_EQ }
+    AND          = { "&&" }
+    OR           = { "||" }
+    NOT          = { "!" }
+    EQ           = { "==" }
+    LT           = { "<" }
+    GT           = { ">" }
+    LT_EQ        = { "<=" }
+    GT_EQ        = { ">=" }
+NUMBER           = @{ ("+" | "-")? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
+    INT          = @{ "0" | (ASCII_NONZERO_DIGIT ~ DIGITS?) }
+    DIGITS       = @{ (ASCII_DIGIT | ("_" ~ ASCII_DIGIT))+ }
+    EXP          = @{ ("E" | "e") ~ ("+" | "-")? ~ INT }
+KEY              = @{ "@"? ~ ID }
+ID               = @{ LETTER ~ ("_" | LETTER | NUMBER )* }
+PATH             = @{ "."+ } // from node path
+INDENT           = _{ (" " | "\t")+ }
+COMMENT          = _{ "#" ~ (!NEWLINE ~ ANY)* }
+WHITESPACE       = _{ " " | "\t" }
