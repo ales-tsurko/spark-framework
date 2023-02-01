@@ -16,7 +16,10 @@ attribute = !{ KEY ~ ":" ~ value
              }
 
 value = _{ expression | list | node_anon | GD_VALUE | STRING | BOOL | NUMBER }
-expression = _{ bool_expr | attr_access | call }
+expression = _{ if_expr | attr_access | call | bool_expr }
+
+if_expr = { "if" ~ bool_expr ~ "\n" ~ block ~ ("else" ~ value)? }
+block = ${ PUSH(INDENT) ~ (PEEK_ALL ~ statement ~ INDENT? ~ "\n")* ~ (PEEK_ALL ~ value ~ INDENT? ~ "\n") ~ DROP }
 
 bool_expr = { (bool_value | "(" ~ bool_expr ~ ")") ~ (BOOL_IN_OP ~ bool_expr)?
               | BOOL_PRE_OP ~ bool_expr
@@ -51,7 +54,7 @@ COMP_OP            = _{ EQ | LT | GT | LT_EQ | GT_EQ }
     GT             = { ">" }
     LT_EQ          = { "<=" }
     GT_EQ          = { ">=" }
-NUMBER             = @{ ("+" | "-")? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
+NUMBER             = @{ "-"? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
     INT            = @{ "0" | (ASCII_NONZERO_DIGIT ~ DIGITS?) }
     DIGITS         = @{ (ASCII_DIGIT | ("_" ~ ASCII_DIGIT))+ }
     EXP            = @{ ("E" | "e") ~ ("+" | "-")? ~ INT }
