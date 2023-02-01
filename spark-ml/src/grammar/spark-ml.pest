@@ -1,11 +1,13 @@
-module = { SOI ~ statement* ~ EOI }
+module = { SOI ~ (statement | "\n")* ~ EOI }
 
-statement = _{ "\n"* ~ (node | ext_resource | sub_resource | assignment) ~ "\n"* }
+statement = _{ (node | assignment | if_expr | call | ext_resource | sub_resource) ~ "\n" }
 ext_resource = { "ext" ~ STRING }
 sub_resource = { "sub" ~ node }
 assignment = !{ ID ~ "=" ~ "\n"* ~ value }
 
-node = !{ ID ~ "from" ~ ID ~ attributes? }
+node = !{ node_id ~ "from" ~ node_id ~ attributes? }
+    node_id = ${ ID ~ (node_id_inner ~ ID?)? }
+        node_id_inner = !{ "{" ~ (call | NUMBER | STRING) ~ "}" }
 attributes = { child_attr+ }
 parent_attr = { attribute ~ attributes }
 child_attr = ${ (COMMENT | "\n")+ ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute)? ~ DROP }
@@ -18,24 +20,29 @@ attribute = !{ KEY ~ ":" ~ value
 value = _{ expression | list | node_anon | GD_VALUE | STRING | BOOL | NUMBER }
 expression = _{ if_expr | attr_access | call | bool_expr }
 
-if_expr = { "if" ~ bool_expr ~ "\n" ~ block ~ ("else" ~ value)? }
-block = ${ PUSH(INDENT) ~ (PEEK_ALL ~ statement ~ INDENT? ~ "\n")* ~ (PEEK_ALL ~ value ~ INDENT? ~ "\n") ~ DROP }
+if_expr = { "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
+    elseif = { "\n"+ ~ "else if" ~ bool_expr ~ body }
+    ifelse = { "\n"+ ~ "else" ~ body }
+body = ${ (COMMENT | "\n")+ ~ PUSH(INDENT) 
+            ~ (body_statement ~ INDENT? ~ (COMMENT | "\n")+ ~ PEEK)* 
+            ~ body_return ~ INDENT? ~ DROP 
+        }
+    body_statement = _{ assignment }
+    body_return = _{ node | value }
 
 bool_expr = { (bool_value | "(" ~ bool_expr ~ ")") ~ (BOOL_IN_OP ~ bool_expr)?
               | BOOL_PRE_OP ~ bool_expr
               | bool_value
             }
 bool_value = _{ BOOL | attr_access | call | comparison }
-comparison = { (comp_value | "(" ~ comparison ~ ")") ~ (COMP_OP ~ comparison)?
-              | comp_value
-            }
-comp_value = _{ NUMBER | attr_access | call}
+comparison = { comp_value ~ COMP_OP ~ comp_value }
+comp_value = _{ NUMBER | STRING | attr_access | call}
 
 list = !{ "[" ~ "\n"* ~ value  ~ ("\n"* ~ "," ~ "\n"* ~ value ~ "\n"*)* ~ "]" }
 node_anon = !{ "from" ~ attributes }
-call = { (fn_call | ID) ~ list_access* }
+call = !{ (fn_call | ID) ~ list_index* }
     fn_call = { ID ~ ("(" ~ value* ~ ")") }
-    list_access = { "[" ~ (NUMBER | attr_access | call) ~ "]" }
+    list_index = { "[" ~ (NUMBER | attr_access | call) ~ "]" }
     attr_access = { call ~ ("\n"* ~ "." ~ call)+ }
 
 GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
@@ -48,8 +55,9 @@ BOOL_IN_OP         = _{ AND | OR }
     OR             = { "||" }
 BOOL_PRE_OP        = _{ NOT }
     NOT            = { "!" }
-COMP_OP            = _{ EQ | LT | GT | LT_EQ | GT_EQ }
+COMP_OP            = _{ EQ | NEQ | LT | GT | LT_EQ | GT_EQ }
     EQ             = { "==" }
+    NEQ            = { "!=" }
     LT             = { "<" }
     GT             = { ">" }
     LT_EQ          = { "<=" }
@@ -59,7 +67,7 @@ NUMBER             = @{ "-"? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
     DIGITS         = @{ (ASCII_DIGIT | ("_" ~ ASCII_DIGIT))+ }
     EXP            = @{ ("E" | "e") ~ ("+" | "-")? ~ INT }
 KEY                = @{ "@"? ~ ID }
-ID                 = @{ LETTER ~ ("_" | LETTER | NUMBER )* }
+ID                 = @{ (LETTER ~ ("_" | LETTER | NUMBER )*) }
 INDENT             = _{ (" " | "\t")+ }
 COMMENT            = _{ "#" ~ (!NEWLINE ~ ANY)* }
 WHITESPACE         = _{ " " | "\t" }
