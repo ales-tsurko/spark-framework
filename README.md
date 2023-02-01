@@ -32,5 +32,5 @@ state via events (with undo/redo and keyboard shortcuts handling).
 [Godot](https://godotengine.org) should be installed in your system. It's also
 should be in your `PATH` variable. You also need
 [`just`](https://just.systems/). And you optionally need
-[watchexec](https://watchexec.github.io/) for [`tree`](spark-ml/tree/) (in case
+[`watchexec`](https://watchexec.github.io/) for [`tree`](spark-ml/tree/) (in case
 you want to play with the parser).
