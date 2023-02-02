@@ -1,30 +1,30 @@
 module = { SOI ~ (statement | "\n")* ~ EOI }
 
-statement        = _{ (assignment | if_expr | call | ext_resource | sub_resource) ~ "\n" }
+statement        = _{ (assignment | node | if_expr | ext_resource | sub_resource | call ) ~ "\n" }
     ext_resource = { "ext" ~ STRING }
     sub_resource = { "sub" ~ node }
     assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
 
 expression = _{ node 
-                | if_expr 
                 | node_anon 
+                | if_expr
+                | BOOL
+                | call
                 | bool_expr 
                 | algebraic_expr 
-                | list 
-                | call
+                | list
                 | NUMBER 
-                | BOOL 
                 | STRING 
                 | GD_VALUE 
               }
 
-if_expr    = { "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
+if_expr    = !{ "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
     elseif = { "\n"+ ~ "else if" ~ bool_expr ~ body }
     ifelse = { "\n"+ ~ "else" ~ body }
 
 body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
                         ~ (body_statement ~ INDENT? ~ blank ~ PEEK_ALL)* 
-                        ~ expression ~ INDENT? ~ DROP 
+                        ~ expression ~ INDENT? ~ DROP
                       }
     blank          = _{ ((INDENT? ~ COMMENT)? ~ "\n")+ }
     body_statement = _{ assignment }
@@ -45,7 +45,7 @@ node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     attributes        = { child_attr+ }
     parent_attr       = { attribute ~ attributes }
     child_attr        = ${ (COMMENT | "\n")+ ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute)? ~ DROP }
-    attribute         = !{ KEY ~ ":" ~ expression
+    attribute         = !{ (KEY ~ ":" ~ expression)
                            | node 
                            | call 
                          }
