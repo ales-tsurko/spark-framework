@@ -39,15 +39,16 @@ if_expr    = !{ "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
 repeat_expr = !{ "repeat" ~ INT ~ body }
 
 body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
-                        ~ (body_statement ~ INDENT? ~ blank ~ PEEK_ALL)* 
-                        ~ expression ~ INDENT? ~ DROP
+                        ~ (body_statement ~ blank ~ (PEEK_ALL ~ body_statement ~ INDENT? ~ blank)*)? 
+                        ~ PEEK_ALL? ~ expression ~ INDENT? ~ DROP
                       }
     blank          = _{ ((INDENT? ~ COMMENT)? ~ "\n")+ }
     body_statement = _{ assignment }
 
-algebraic_expr      = !{ (MATH_PRE_OP? ~ (alg_value | nested_alg_expr) ~ MATH_IN_OP?)+ }
+algebraic_expr      = !{ (MATH_PRE_OP ~ (alg_value | nested_alg_expr)) 
+                         | (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_value | nested_alg_expr))+ }
     nested_alg_expr = _{ "(" ~ algebraic_expr ~ ")" }
-    alg_value       = _{ NUMBER | call }
+    alg_value       = _{ call | NUMBER }
 
 bool_expr            = { (BOOL_PRE_OP? ~ (bool_value | nested_bool_expr) ~ BOOL_IN_OP?)+ }
     nested_bool_expr = _{ "(" ~ bool_expr ~ ")" }
