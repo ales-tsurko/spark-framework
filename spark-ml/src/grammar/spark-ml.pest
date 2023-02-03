@@ -1,17 +1,31 @@
 module = { SOI ~ (statement | "\n")* ~ EOI }
 
-statement        = _{ (assignment | node | if_expr | ext_resource | sub_resource | call ) ~ "\n" }
-    ext_resource = { "ext" ~ STRING }
+statement        = _{ (
+                        assignment 
+                        | func_def
+                        | node 
+                        | if_expr 
+                        | repeat_expr 
+                        | ext_resource 
+                        | sub_resource 
+                        | call 
+                      ) 
+                      ~ "\n" 
+                    }
+    ext_resource = { "ext" ~ ( STRING | ID ) }
     sub_resource = { "sub" ~ node }
     assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
+    func_def     = !{ "fn" ~ ID ~ func_args ~ body}
+        func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
 
 expression = _{ node 
                 | node_anon 
                 | if_expr
+                | repeat_expr
                 | BOOL
+                | algebraic_expr 
                 | call
                 | bool_expr 
-                | algebraic_expr 
                 | list
                 | NUMBER 
                 | STRING 
@@ -22,6 +36,8 @@ if_expr    = !{ "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
     elseif = { "\n"+ ~ "else if" ~ bool_expr ~ body }
     ifelse = { "\n"+ ~ "else" ~ body }
 
+repeat_expr = !{ "repeat" ~ INT ~ body }
+
 body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
                         ~ (body_statement ~ INDENT? ~ blank ~ PEEK_ALL)* 
                         ~ expression ~ INDENT? ~ DROP
@@ -29,15 +45,20 @@ body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
     blank          = _{ ((INDENT? ~ COMMENT)? ~ "\n")+ }
     body_statement = _{ assignment }
 
-algebraic_expr      = { (MATH_PRE_OP? ~ (alg_value | nested_alg_expr) ~ MATH_IN_OP?)+ }
+algebraic_expr      = !{ (MATH_PRE_OP? ~ (alg_value | nested_alg_expr) ~ MATH_IN_OP?)+ }
     nested_alg_expr = _{ "(" ~ algebraic_expr ~ ")" }
-    alg_value       = _{ call | NUMBER }
+    alg_value       = _{ NUMBER | call }
 
 bool_expr            = { (BOOL_PRE_OP? ~ (bool_value | nested_bool_expr) ~ BOOL_IN_OP?)+ }
     nested_bool_expr = _{ "(" ~ bool_expr ~ ")" }
     bool_value       = _{ BOOL | call | comparison }
     comparison       = { comp_value ~ COMP_OP ~ comp_value }
     comp_value       = _{ NUMBER | STRING | call }
+
+call            = !{ (fn_call | ID) ~ list_index* ~ attr_access? }
+    fn_call     = { ID ~ "(" ~ "\n"* ~ (expression ~ ("," ~ "\n"* ~ expression ~ "\n"*)*)? ~ ")" }
+    list_index  = { "[" ~ (NUMBER | call) ~ "]" }
+    attr_access = _{ ("\n"* ~ "." ~ call)+ }
 
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
@@ -53,11 +74,6 @@ node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
 node_anon = !{ "from" ~ attributes }
 
 list = !{ "[" ~ "\n"* ~ expression  ~ ("\n"* ~ "," ~ "\n"* ~ expression ~ "\n"*)* ~ "]" }
-
-call            = !{ (fn_call | ID) ~ list_index* ~ attr_access? }
-    fn_call     = { ID ~ ("(" ~ expression* ~ ")") }
-    list_index  = { "[" ~ (NUMBER | call) ~ "]" }
-    attr_access = _{ ("\n"* ~ "." ~ call)+ }
 
 GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
     GD_VALUE_INNER = { (!(NEWLINE | "`") ~ ANY)* }
