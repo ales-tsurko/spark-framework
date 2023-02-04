@@ -4,6 +4,7 @@ statement        = _{ (
                         assignment 
                         | node 
                         | signal_def
+                        | animation_def
                         | func_def
                         | if_expr 
                         | repeat_expr 
@@ -23,8 +24,11 @@ assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
 func_def     = !{ "fn" ~ ID ~ func_args ~ body}
     func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
 
-signal_def   = !{ signal_id ~ "=>" ~ signal_id }
+signal_def    = !{ signal_id ~ "=>" ~ signal_id }
     signal_id = { ID ~ ("." ~ ID )+ }
+
+animation_def        = !{ signal_id ~ "~" ~ animation_params }
+    animation_params = { node_id ~ attributes }
 
 expression = _{ node 
                 | node_anon 
