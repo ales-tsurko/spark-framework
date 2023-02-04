@@ -1,4 +1,4 @@
-module = { SOI ~ (statement | "\n")* ~ EOI }
+module = { SOI ~ (statement | NEWLINE)* ~ EOI }
 
 statement        = _{ (
                         assignment 
@@ -6,88 +6,94 @@ statement        = _{ (
                         | signal_def
                         | animation_def
                         | func_def
+                        | export
                         | if_expr 
                         | repeat_expr 
                         | ext_resource 
                         | sub_resource 
                         | call 
                       ) 
-                      ~ "\n" 
+                      ~ NEWLINE 
                     }
 
 ext_resource = { "ext" ~ ( STRING | ID ) }
 
 sub_resource = { "sub" ~ node }
 
-assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
+assignment   = !{ ID ~ "=" ~ NEWLINE* ~ expression }
 
 func_def     = !{ "fn" ~ ID ~ func_args ~ body}
     func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
 
-signal_def    = !{ signal_id ~ "=>" ~ signal_id }
-    signal_id = { ID ~ ("." ~ ID )+ }
+export = {"export" ~ (assignment | func_def) }
 
-animation_def        = !{ signal_id ~ "~" ~ animation_params }
+signal_def    = !{ attr_id ~ "=>" ~ attr_id }
+    attr_id   = { ID ~ ("." ~ ID )+ }
+
+animation_def        = !{ attr_id ~ "~" ~ animation_params }
     animation_params = { node_id ~ attributes }
 
 expression = _{ node 
                 | node_anon 
                 | if_expr
                 | repeat_expr
-                | BOOL
                 | algebraic_expr 
-                | call
                 | bool_expr 
+                | BOOL
+                | call
                 | list
                 | NUMBER 
                 | STRING 
                 | GD_VALUE 
               }
 
-if_expr    = !{ "if" ~ bool_expr ~ body ~ elseif* ~ ifelse? }
-    elseif = { "\n"+ ~ "else if" ~ bool_expr ~ body }
-    ifelse = { "\n"+ ~ "else" ~ body }
+if_expr    = !{ "if" ~ (bool_expr | BOOL | call) ~ body ~ elseif* ~ ifelse? }
+    elseif = { NEWLINE+ ~ "else if" ~ (bool_expr | BOOL | call) ~ body }
+    ifelse = { NEWLINE+ ~ "else" ~ body }
 
-repeat_expr = !{ "repeat" ~ INT ~ body }
+repeat_expr = !{ "repeat" ~ (INT | call) ~ body }
 
 body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
                         ~ (body_statement ~ blank ~ (PEEK_ALL ~ body_statement ~ INDENT? ~ blank)*)? 
                         ~ PEEK_ALL? ~ expression ~ INDENT? ~ DROP
                       }
-    blank          = _{ ((INDENT? ~ COMMENT)? ~ "\n")+ }
     body_statement = _{ assignment }
 
 algebraic_expr      = !{ (MATH_PRE_OP ~ (alg_value | nested_alg_expr)) 
-                         | (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_value | nested_alg_expr))+ }
+                         | (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_value | nested_alg_expr))+
+                       }
     nested_alg_expr = _{ "(" ~ algebraic_expr ~ ")" }
     alg_value       = _{ call | NUMBER }
 
-bool_expr            = { (BOOL_PRE_OP? ~ (bool_value | nested_bool_expr) ~ BOOL_IN_OP?)+ }
-    nested_bool_expr = _{ "(" ~ bool_expr ~ ")" }
-    bool_value       = _{ BOOL | call | comparison }
-    comparison       = { comp_value ~ COMP_OP ~ comp_value }
-    comp_value       = _{ NUMBER | STRING | call }
+bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_value | bool_expr))+ 
+                          | nested_bool_expr
+                        }
+    nested_bool_expr = _{ BOOL_PRE_OP? ~ "(" ~ bool_expr ~ ")" }
+    bool_value       = _{ BOOL_PRE_OP?  ~ (BOOL | comparison | call) }
+        comparison   = { comp_value ~ COMP_OP ~ comp_value }
+        comp_value   = _{ NUMBER | STRING | call }
 
 call            = !{ (fn_call | ID) ~ list_index* ~ attr_access? }
-    fn_call     = { ID ~ "(" ~ "\n"* ~ (expression ~ ("," ~ "\n"* ~ expression ~ "\n"*)*)? ~ ")" }
+    fn_call     = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
     list_index  = { "[" ~ (NUMBER | call) ~ "]" }
-    attr_access = _{ ("\n"* ~ "." ~ call)+ }
+    attr_access = _{ (NEWLINE* ~ "." ~ call)+ }
 
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
-        node_id_inner = !{ "{" ~ (call | NUMBER | STRING) ~ "}" }
-    attributes        = { child_attr+ }
-    parent_attr       = { attribute ~ attributes }
-    child_attr        = ${ (COMMENT | "\n")+ ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute)? ~ DROP }
-    attribute         = !{ (KEY ~ ":" ~ expression)
+        node_id_inner = !{ "{" ~ (NUMBER | STRING | call) ~ "}" }
+    attributes        = ${ child_attr+ }
+    child_attr        = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute) ~ DROP }
+    parent_attr       = _{ attribute ~ attributes }
+    attribute         = !{ (KEY ~ ":" ~ expression?)
                            | node 
                            | call 
                          }
 
 node_anon = !{ "from" ~ attributes }
 
-list = !{ "[" ~ "\n"* ~ expression  ~ ("\n"* ~ "," ~ "\n"* ~ expression ~ "\n"*)* ~ "]" }
+list = !{ "[" ~ NEWLINE* ~ expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)* ~ "]" }
 
+blank              = _{ ((INDENT? ~ COMMENT)? ~ NEWLINE)+ }
 GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
     GD_VALUE_INNER = { (!(NEWLINE | "`") ~ ANY)* }
 STRING             = ${ "\"" ~ STRING_INNER ~ "\"" }
@@ -118,7 +124,7 @@ NUMBER             = @{ "-"? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
     DIGITS         = @{ (ASCII_DIGIT | ("_" ~ ASCII_DIGIT))+ }
     EXP            = @{ ("E" | "e") ~ ("+" | "-")? ~ INT }
 KEY                = @{ "@"? ~ ID }
-ID                 = @{ (LETTER ~ ("_" | LETTER | NUMBER )*) }
+ID                 = @{ LETTER ~ ("_" | LETTER | NUMBER )* }
 INDENT             = _{ (" " | "\t")+ }
 COMMENT            = _{ "#" ~ (!NEWLINE ~ ANY)* }
 WHITESPACE         = _{ " " | "\t" }
