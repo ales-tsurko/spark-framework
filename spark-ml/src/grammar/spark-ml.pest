@@ -2,8 +2,9 @@ module = { SOI ~ (statement | "\n")* ~ EOI }
 
 statement        = _{ (
                         assignment 
-                        | func_def
                         | node 
+                        | signal_def
+                        | func_def
                         | if_expr 
                         | repeat_expr 
                         | ext_resource 
@@ -12,11 +13,18 @@ statement        = _{ (
                       ) 
                       ~ "\n" 
                     }
-    ext_resource = { "ext" ~ ( STRING | ID ) }
-    sub_resource = { "sub" ~ node }
-    assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
-    func_def     = !{ "fn" ~ ID ~ func_args ~ body}
-        func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
+
+ext_resource = { "ext" ~ ( STRING | ID ) }
+
+sub_resource = { "sub" ~ node }
+
+assignment   = !{ ID ~ "=" ~ "\n"* ~ expression }
+
+func_def     = !{ "fn" ~ ID ~ func_args ~ body}
+    func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
+
+signal_def   = !{ signal_id ~ "=>" ~ signal_id }
+    signal_id = { ID ~ ("." ~ ID )+ }
 
 expression = _{ node 
                 | node_anon 
