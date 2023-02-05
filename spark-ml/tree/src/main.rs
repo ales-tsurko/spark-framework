@@ -8,11 +8,11 @@
 //! cargo run -q --bin tree -- spark-ml/test_input/test.sprk
 //! ```
 
-use std::{fs, env};
+use std::{env, fs};
 
-use pest_tools::parser_tree_as_string;
 use pest::Parser;
-use spark_ml::parser::{SparkMLParser, Rule};
+use pest_tools::parser_tree_as_string;
+use spark_ml::parser::{Rule, SparkMLParser};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
