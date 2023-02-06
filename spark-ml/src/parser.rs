@@ -42,8 +42,12 @@ impl SparkMLParser {
             Rule::BOOL => Ok(Expression::Value(Value::Boolean(
                 pair.as_str().parse().unwrap(),
             ))),
-            Rule::call => todo!(),
-            Rule::list => todo!(),
+            Rule::call => Self::parse_call(pair.into_inner().next().unwrap()),
+            Rule::list => Ok(Expression::List(
+                pair.into_inner()
+                    .map(Self::parse_expression)
+                    .collect::<ParseResult<Vec<Expression>>>()?,
+            )),
             Rule::NUMBER => Ok(Expression::Value(Value::Number(
                 pair.as_str().parse().unwrap(),
             ))),
@@ -73,6 +77,34 @@ impl SparkMLParser {
             id.as_str().into(),
             Box::new(Self::parse_expression(expression)?),
         ))
+    }
+
+    fn parse_call(pair: Pair<Rule>) -> ParseResult<Expression> {
+        match pair.as_rule() {
+            Rule::call_chain => todo!(),
+            Rule::list_index => {
+                let mut inner = pair.into_inner();
+                // NOTE: it can be call only, but not wrapped into Rule::call
+                let expression = Self::parse_call(inner.next().unwrap())?;
+                let indices = inner
+                    .map(Self::parse_expression)
+                    .collect::<ParseResult<Vec<Expression>>>()?;
+
+                Ok(indices.into_iter().fold(expression, |acc, index| {
+                    Expression::ListIndex(Box::new(acc), Box::new(index))
+                }))
+            }
+            Rule::fn_call => {
+                let mut inner = pair.into_inner();
+                let id: Id = inner.next().unwrap().as_str().into();
+                let args = inner
+                    .map(Self::parse_expression)
+                    .collect::<ParseResult<Vec<Expression>>>()?;
+                Ok(Expression::Function(id, args))
+            }
+            Rule::var_call => Ok(Expression::Variable(pair.into_inner().as_str().into())),
+            _ => unreachable!(),
+        }
     }
 
     fn parse_func_def(
@@ -112,11 +144,13 @@ enum Expression {
     Assignment(Id, Box<Expression>),
     Value(Value),
     Function(Id, Vec<Expression>),
+    Variable(Id),
     If,
     Repeat,
     Algebraic,
     Boolean,
     List(Vec<Expression>),
+    ListIndex(Box<Expression>, Box<Expression>),
 }
 
 impl Expression {
@@ -128,16 +162,46 @@ impl Expression {
     ) -> ParseResult<Value> {
         match self {
             Expression::Value(val) => Ok(val.clone()),
+
             Expression::Assignment(id, expression) => {
                 let value = expression.eval(pair, context, ftable)?;
                 context.assign_var(pair, id.clone(), value.clone())?;
                 Ok(value)
             }
+
             Expression::Function(id, args) => {
                 if let Some(function) = ftable.table.get(&id) {
                     function.call_with_args(pair, args)
                 } else {
-                    Err(custom_error(pair, &format!("Function {} not found", id.0)))
+                    Err(custom_error(
+                        pair,
+                        &format!("Function '{}' not found", id.0),
+                    ))
+                }
+            }
+
+            Expression::List(list) => Ok(Value::List(
+                list.iter()
+                    .map(|expr| expr.eval(pair, context, ftable))
+                    .collect::<ParseResult<Vec<Value>>>()?,
+            )),
+
+            Expression::Variable(id) => context
+                .get_recursive(id)
+                .ok_or_else(|| custom_error(pair, &format!("'{}' not found", id.0))),
+
+            Expression::ListIndex(expression, index) => {
+                if let Value::List(value) = expression.eval(pair, context, ftable)? {
+                    if let Value::Number(index) = index.eval(pair, context, ftable)? {
+                        let index = index as usize;
+                        value.get(index).cloned().ok_or_else(|| {
+                            custom_error(pair, &format!("Index '{}' is out of bounds", index))
+                        })
+                    } else {
+                        Err(custom_error(pair, "Index should be a number"))
+                    }
+                } else {
+                    Err(custom_error(pair, "Only lists can be indexed"))
                 }
             }
             _ => todo!(),
@@ -180,11 +244,7 @@ struct Function {
 
 impl Function {
     fn new(name: Id, args: Vec<Id>, body: Body) -> Self {
-        Self {
-            name,
-            args,
-            body,
-        }
+        Self { name, args, body }
     }
 
     fn call_with_args(&self, pair: &Pair<Rule>, args: &[Expression]) -> ParseResult<Value> {
@@ -665,7 +725,93 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expression_value() {
+    fn test_expression_call() {
+        let pair = SparkMLParser::parse(Rule::call, "foo")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair).unwrap(),
+            Expression::Variable("foo".into())
+        );
+
+        let pair = SparkMLParser::parse(Rule::call, "foo(true, false)")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair).unwrap(),
+            Expression::Function(
+                "foo".into(),
+                vec![
+                    Expression::Value(Value::Boolean(true)),
+                    Expression::Value(Value::Boolean(false))
+                ]
+            )
+        );
+
+        let mut context = Context::<Value>::default();
+        let ftable = Context::<Function>::default();
+        let pair = SparkMLParser::parse(Rule::assignment, "foo = [[4,3],[2,1]]")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert!(SparkMLParser::parse_expression(pair.clone())
+            .unwrap()
+            .eval(&pair, &mut context, &ftable)
+            .is_ok());
+
+        let pair = SparkMLParser::parse(Rule::call, "foo[0][1]")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::Number(3.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::call, "foo[1][1]")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::Number(1.0)
+        );
+    }
+
+    #[test]
+    fn test_expression_list() {
+        let mut context = Context::<Value>::default();
+        let ftable = Context::<Function>::default();
+        let pair = SparkMLParser::parse(Rule::expression, "[true,false,false]")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::List(vec![
+                Value::Boolean(true),
+                Value::Boolean(false),
+                Value::Boolean(false)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_expression_value() {
         let mut context = Context::<Value>::default();
         let ftable = Context::<Function>::default();
         let pair = SparkMLParser::parse(Rule::expression, "1")

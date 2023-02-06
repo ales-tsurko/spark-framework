@@ -76,10 +76,11 @@ bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_
         comparison   = { comp_value ~ COMP_OP ~ comp_value }
         comp_value   = _{ NUMBER | STRING | call }
 
-call            = !{ (fn_call | ID) ~ list_index* ~ attr_access? }
+call            = !{ call_chain | list_index | fn_call | var_call }
     fn_call     = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
-    list_index  = { "[" ~ (NUMBER | call) ~ "]" }
-    attr_access = _{ (NEWLINE* ~ "." ~ call)+ }
+    var_call    = { ID }
+    list_index  = { (fn_call | var_call) ~ ("[" ~ (NUMBER | call) ~ "]")+ }
+    call_chain  = { (list_index | fn_call | var_call) ~ (NEWLINE* ~ "." ~ (list_index | fn_call | var_call))+ }
 
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
