@@ -204,6 +204,7 @@ dependencies = [
 name = "spark-ml"
 version = "0.1.0"
 dependencies = [
+ "once_cell",
  "pest",
  "pest_derive",
 ]

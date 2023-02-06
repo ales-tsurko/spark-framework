@@ -25,7 +25,10 @@ assignment   = !{ ID ~ "=" ~ NEWLINE* ~ expression }
 func_def     = !{ "fn" ~ ID ~ func_args ~ body}
     func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
 
-export = {"export" ~ (assignment | func_def) }
+// it's easier to parse this way
+export = _{ export_func | export_var }
+    export_func = {"export" ~ func_def}
+    export_var = {"export" ~ assignment}
 
 signal_def    = !{ attr_id ~ "=>" ~ attr_id }
     attr_id   = { ID ~ ("." ~ ID )+ }

@@ -1,16 +1,25 @@
 //! SparkML parser
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 
+use once_cell::sync::Lazy;
 use pest::error::{Error, ErrorVariant};
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
 use pest_derive::Parser;
+
+static RESERVED_WORDS: Lazy<HashSet<&str>> = Lazy::new(|| {
+    [
+        "else", "export", "ext", "false", "fn", "from", "if", "repeat", "sub", "true",
+    ]
+    .into()
+});
 
 /// The parser result.
 pub type ParseResult<T> = Result<T, Box<Error<Rule>>>;
@@ -20,12 +29,263 @@ pub type ParseResult<T> = Result<T, Box<Error<Rule>>>;
 #[grammar = "grammar/spark-ml.pest"] // relative to project `src`
 pub struct SparkMLParser;
 
+impl SparkMLParser {
+    fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Expression> {
+        let mut pairs = pair.into_inner();
+        let id = pairs.next().unwrap();
+        let expression = pairs.next().unwrap();
+
+        if RESERVED_WORDS.contains(id.as_str()) {
+            return Err(custom_error(
+                &id,
+                &format!("{} is a reserved keyword", id.as_str()),
+            ));
+        }
+
+        Ok(Expression::Assignment(
+            id.as_str().into(),
+            Box::new(Self::parse_expression(expression)?),
+        ))
+    }
+
+    fn parse_expression(pair: Pair<Rule>) -> ParseResult<Expression> {
+        match pair.as_rule() {
+            Rule::node => todo!(),
+            Rule::node_anon => todo!(),
+            Rule::if_expr => todo!(),
+            Rule::repeat_expr => todo!(),
+            Rule::algebraic_expr => todo!(),
+            Rule::bool_expr => todo!(),
+            Rule::BOOL => Ok(Expression::Value(Value::Boolean(
+                pair.as_str().parse().unwrap(),
+            ))),
+            Rule::call => todo!(),
+            Rule::list => todo!(),
+            Rule::NUMBER => Ok(Expression::Value(Value::Number(
+                pair.as_str().parse().unwrap(),
+            ))),
+            Rule::STRING => Ok(Expression::Value(Value::String(
+                pair.into_inner().next().unwrap().as_str().into(),
+            ))),
+            Rule::GD_VALUE => Ok(Expression::Value(Value::GdValue(
+                pair.into_inner().next().unwrap().as_str().into(),
+            ))),
+            _ => unreachable!(),
+        }
+    }
+
+    fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Function> {
+        dbg!(pair);
+        todo!()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Expression {
+    Assignment(Id, Box<Expression>),
+    Value(Value),
+    Function(Id, Vec<Expression>),
+    If,
+    Repeat,
+    Algebraic,
+    Boolean,
+    List(Vec<Expression>),
+}
+
+impl Expression {
+    fn eval(
+        &self,
+        pair: &Pair<Rule>,
+        context: &mut Context<Value>,
+        ftable: &Context<Function>,
+    ) -> ParseResult<Value> {
+        match self {
+            Expression::Value(val) => Ok(val.clone()),
+            Expression::Assignment(id, expression) => {
+                let value = expression.eval(pair, context, ftable)?;
+                context.assign_var(pair, id.clone(), value.clone())?;
+                Ok(value)
+            }
+            Expression::Function(id, args) => {
+                if let Some(function) = ftable.table.get(&id) {
+                    function.call_with_args(pair, args)
+                } else {
+                    Err(custom_error(pair, &format!("Function {} not found", id.0)))
+                }
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+#[non_exhaustive]
+enum Value {
+    Node,
+    Object,
+    String(String),
+    Boolean(bool),
+    List(Vec<Value>),
+    Number(f64),
+    GdValue(String),
+}
+
+impl Value {
+    fn ty_name(&self) -> &'static str {
+        match self {
+            Self::Node => "Node",
+            Self::Object => "Object",
+            Self::String(_) => "String",
+            Self::Boolean(_) => "Boolean",
+            Self::List(_) => "List",
+            Self::Number(_) => "Number",
+            Self::GdValue(_) => "GdValue",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Function {
+    id: Id,
+    args: Vec<Id>,
+    body: Body,
+}
+
+impl Function {
+    fn call_with_args(&self, pair: &Pair<Rule>, args: &[Expression]) -> ParseResult<Value> {
+        if self.args.len() != args.len() {
+            return Err(custom_error(
+                pair,
+                &format!("expected {} arguments, got {}", self.args.len(), args.len()),
+            ));
+        }
+
+        {
+            let mut context = (*self.body.context).borrow_mut();
+            let ftable = (*self.body.ftable).borrow();
+
+            for (n, arg) in args.iter().enumerate() {
+                let value = arg.eval(pair, &mut context, &ftable)?;
+                context.assign_var(pair, self.args[n].clone(), value)?;
+            }
+        }
+
+        self.body.eval(pair)
+    }
+}
+
+#[derive(Debug)]
+struct Body {
+    statements: Vec<Expression>,
+    context: Rc<RefCell<Context<Value>>>,
+    ftable: Rc<RefCell<Context<Function>>>,
+}
+
+impl Body {
+    fn eval(&self, pair: &Pair<Rule>) -> ParseResult<Value> {
+        let ftable = (*self.ftable).borrow();
+        let mut context = (*self.context).borrow_mut();
+        let (last, rest) = self.statements.split_last().unwrap();
+
+        for expression in rest {
+            expression.eval(pair, &mut context, &ftable)?;
+        }
+
+        last.eval(pair, &mut context, &ftable)
+    }
+}
+
+/// Context is a scoped storage for variables and functions.
+#[derive(Debug)]
+struct Context<T> {
+    table: HashMap<Id, T>,
+    parent: Option<Rc<RefCell<Self>>>,
+}
+
+impl<T> Default for Context<T> {
+    fn default() -> Self {
+        Self {
+            table: HashMap::new(),
+            parent: None,
+        }
+    }
+}
+
+impl<T> Context<T> {
+    fn with_parent(parent: Rc<RefCell<Self>>) -> Self {
+        Self {
+            parent: Some(parent),
+            table: HashMap::new(),
+        }
+    }
+
+    fn get_non_recursive(&self, id: &Id) -> Option<&T> {
+        self.table.get(id)
+    }
+}
+
+impl<T: Clone> Context<T> {
+    fn get_recursive(&self, id: &Id) -> Option<T> {
+        self.table
+            .get(id)
+            .cloned()
+            .or_else(|| {
+                self.parent
+                    .as_ref()
+                    .and_then(|parent: &Rc<RefCell<Self>>| (*parent).borrow().get_recursive(id))
+            })
+            .clone()
+    }
+}
+
+impl Context<Value> {
+    fn assign_var(&mut self, pair: &Pair<Rule>, id: Id, value: Value) -> ParseResult<()> {
+        match self.table.get_mut(&id) {
+            None => {
+                self.table.insert(id, value);
+                Ok(())
+            }
+            Some(val) => {
+                if mem::discriminant(val) != mem::discriminant(&value) {
+                    return Err(custom_error(
+                        &pair,
+                        &format!(
+                            "Type mismatch: expected {} found {}",
+                            val.ty_name(),
+                            value.ty_name()
+                        ),
+                    ));
+                }
+                *val = value;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Context<Function> {
+    fn add_func_def(&mut self, pair: &Pair<Rule>, func_def: Function) -> ParseResult<()> {
+        match self.table.get_mut(&func_def.id) {
+            None => {
+                self.table.insert(func_def.id.clone(), func_def);
+                Ok(())
+            }
+            Some(_) => Err(custom_error(
+                &pair,
+                &format!("Function {} already defined", func_def.id.0),
+            )),
+        }
+    }
+}
+
 /// Represents a SparkML module.
 pub struct Module {
     ext_resources: HashMap<ExtResource, usize>,
     ext_res_incr: Box<dyn FnMut() -> usize>,
-    variables: Rc<Context<Value>>,
-    // functions: Rc<Context<Function>>,
+    context: Rc<RefCell<Context<Value>>>,
+    ftable: Rc<RefCell<Context<Function>>>,
+    exports_func: HashSet<Id>,
+    exports_var: HashSet<Id>,
 }
 
 impl Default for Module {
@@ -33,7 +293,10 @@ impl Default for Module {
         Self {
             ext_resources: HashMap::new(),
             ext_res_incr: new_incr(),
-            variables: Rc::new(Context::<Value>::default()),
+            context: Default::default(),
+            ftable: Default::default(),
+            exports_func: Default::default(),
+            exports_var: Default::default(),
         }
     }
 }
@@ -51,12 +314,25 @@ impl Module {
     fn parse_top_inner(pairs: Pairs<Rule>) -> ParseResult<Self> {
         let mut module = Self::default();
 
-        for pair in pairs {
+        let (func_defs, rest): (Vec<Pair<Rule>>, Vec<Pair<Rule>>) = pairs.partition(|pair| {
+            matches!(pair.as_rule(), Rule::func_def) || matches!(pair.as_rule(), Rule::export_func)
+        });
+
+        // we need to define all functions first, to be able to call them from expressions
+        module.process_func_defs(func_defs)?;
+
+        for pair in rest {
             match pair.as_rule() {
                 Rule::ext_resource => module.add_ext_resource(pair)?,
-                Rule::assignment => todo!(),
-                Rule::func_def => todo!(),
-                Rule::export => todo!(),
+                Rule::assignment => {
+                    SparkMLParser::parse_assignment(pair.clone())?.eval(
+                        &pair,
+                        &mut (*module.context).borrow_mut(),
+                        &(*module.ftable).borrow(),
+                    )?;
+                    ()
+                }
+                Rule::export_var => todo!(),
                 Rule::if_expr => todo!(),
                 Rule::repeat_expr => todo!(),
                 Rule::call => todo!(),
@@ -69,6 +345,28 @@ impl Module {
         }
 
         Ok(module)
+    }
+
+    fn process_func_defs(&mut self, pairs: Vec<Pair<Rule>>) -> ParseResult<()> {
+        for pair in pairs {
+            let (exports, pair) = if matches!(pair.as_rule(), Rule::export_func) {
+                (true, pair.into_inner().next().unwrap())
+            } else {
+                (false, pair)
+            };
+
+            let function = SparkMLParser::parse_func_def(pair.clone())?;
+
+            let id = function.id.clone();
+
+            (*self.ftable).borrow_mut().add_func_def(&pair, function)?;
+
+            if exports {
+                self.exports_func.insert(id);
+            }
+        }
+
+        Ok(())
     }
 
     fn add_ext_resource(&mut self, pair: Pair<Rule>) -> ParseResult<()> {
@@ -163,81 +461,6 @@ impl ExtResource {
                 "tscn" => Ok(ExtResource::Scene(path.to_path_buf())),
                 _ => Err(custom_error(&pair, "Unsupported resource type.")),
             },
-        }
-    }
-}
-
-/// Context is a scoped storage for variables and functions.
-#[derive(Debug)]
-struct Context<T> {
-    table: HashMap<Id, T>,
-    parent: Option<Rc<Self>>,
-}
-
-impl<T> Context<T> {
-    fn with_parent(parent: Rc<Self>) -> Self {
-        Self {
-            parent: Some(parent),
-            table: HashMap::new(),
-        }
-    }
-}
-
-impl Default for Context<Value> {
-    fn default() -> Self {
-        Self {
-            table: HashMap::new(),
-            parent: None,
-        }
-    }
-}
-
-impl Context<Value> {
-    fn assign_var(&mut self, pair: &Pair<Rule>, id: Id, value: Value) -> ParseResult<()> {
-        match self.table.get_mut(&id) {
-            None => {
-                self.table.insert(id, value);
-                Ok(())
-            }
-            Some(val) => {
-                if mem::discriminant(val) != mem::discriminant(&value) {
-                    return Err(custom_error(
-                        &pair,
-                        &format!(
-                            "Type mismatch: expected {} found {}",
-                            val.ty_name(),
-                            value.ty_name()
-                        ),
-                    ));
-                }
-                *val = value;
-                Ok(())
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-enum Value {
-    Node,
-    Object,
-    String(String),
-    Boolean(bool),
-    List,
-    Number(f64),
-    GdValue,
-}
-
-impl Value {
-    fn ty_name(&self) -> &'static str {
-        match self {
-            Self::Node => "Node",
-            Self::Object => "Object",
-            Self::String(_) => "String",
-            Self::Boolean(_) => "Boolean",
-            Self::List => "List",
-            Self::Number(_) => "Number",
-            Self::GdValue => "GdValue",
         }
     }
 }
@@ -342,5 +565,137 @@ mod tests {
         assert!(context
             .assign_var(&pair, "foo".into(), Value::Number(1.0))
             .is_err());
+    }
+
+    #[test]
+    fn test_parse_func_def() {
+        let pair = SparkMLParser::parse(
+            Rule::export,
+            r#"export fn foo(a, b)
+                n = 10
+                20"#,
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .into_inner()
+        .next()
+        .unwrap();
+        let function = SparkMLParser::parse_func_def(pair).unwrap();
+    }
+
+    #[test]
+    fn test_parse_expression_assignment() {
+        let mut context = Context::<Value>::default();
+        let ftable = Context::<Function>::default();
+        let pair = SparkMLParser::parse(Rule::assignment, "foo = true")
+            .unwrap()
+            .next()
+            .unwrap();
+        let assignment = SparkMLParser::parse_assignment(pair.clone()).unwrap();
+        assert_eq!(
+            assignment.eval(&pair, &mut context, &ftable).unwrap(),
+            Value::Boolean(true)
+        );
+
+        assert_eq!(context.table[&"foo".into()], Value::Boolean(true));
+
+        // using reserved keyword is not allowed
+        let pair = SparkMLParser::parse(Rule::assignment, "true = false")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert!(SparkMLParser::parse_assignment(pair).is_err());
+    }
+
+    #[test]
+    fn test_parse_expression_value() {
+        let mut context = Context::<Value>::default();
+        let ftable = Context::<Function>::default();
+        let pair = SparkMLParser::parse(Rule::expression, "1")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::Number(1.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::expression, "1.0")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::Number(1.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::expression, "1E-2")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::Number(0.01)
+        );
+
+        let pair = SparkMLParser::parse(Rule::expression, r#""This is a string\nhello""#)
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::String("This is a string\\nhello".to_string())
+        );
+
+        let pair = SparkMLParser::parse(Rule::expression, r#"`NodePath("Path:")`"#)
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            SparkMLParser::parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, &mut context, &ftable)
+                .unwrap(),
+            Value::GdValue("NodePath(\"Path:\")".to_string())
+        );
+
+        let pair = SparkMLParser::parse(Rule::expression, "true")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert!(matches!(
+            SparkMLParser::parse_expression(pair.clone()).unwrap().eval(
+                &pair,
+                &mut context,
+                &ftable
+            ),
+            Ok(Value::Boolean(true))
+        ));
+
+        let pair = SparkMLParser::parse(Rule::expression, "false")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert!(matches!(
+            SparkMLParser::parse_expression(pair.clone()).unwrap().eval(
+                &pair,
+                &mut context,
+                &ftable
+            ),
+            Ok(Value::Boolean(false))
+        ));
     }
 }
