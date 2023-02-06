@@ -30,28 +30,11 @@ pub type ParseResult<T> = Result<T, Box<Error<Rule>>>;
 pub struct SparkMLParser;
 
 impl SparkMLParser {
-    fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Expression> {
-        let mut pairs = pair.into_inner();
-        let id = pairs.next().unwrap();
-        let expression = pairs.next().unwrap();
-
-        if RESERVED_WORDS.contains(id.as_str()) {
-            return Err(custom_error(
-                &id,
-                &format!("{} is a reserved keyword", id.as_str()),
-            ));
-        }
-
-        Ok(Expression::Assignment(
-            id.as_str().into(),
-            Box::new(Self::parse_expression(expression)?),
-        ))
-    }
-
     fn parse_expression(pair: Pair<Rule>) -> ParseResult<Expression> {
         match pair.as_rule() {
             Rule::node => todo!(),
             Rule::node_anon => todo!(),
+            Rule::assignment => Self::parse_assignment(pair),
             Rule::if_expr => todo!(),
             Rule::repeat_expr => todo!(),
             Rule::algebraic_expr => todo!(),
@@ -74,9 +57,53 @@ impl SparkMLParser {
         }
     }
 
-    fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Function> {
-        dbg!(pair);
-        todo!()
+    fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Expression> {
+        let mut pairs = pair.into_inner();
+        let id = pairs.next().unwrap();
+        let expression = pairs.next().unwrap();
+
+        if RESERVED_WORDS.contains(id.as_str()) {
+            return Err(custom_error(
+                &id,
+                &format!("{} is a reserved keyword", id.as_str()),
+            ));
+        }
+
+        Ok(Expression::Assignment(
+            id.as_str().into(),
+            Box::new(Self::parse_expression(expression)?),
+        ))
+    }
+
+    fn parse_func_def(
+        pair: Pair<Rule>,
+        context: Rc<RefCell<Context<Value>>>,
+        ftable: Rc<RefCell<Context<Function>>>,
+    ) -> ParseResult<Function> {
+        let mut inner = pair.into_inner();
+        let id: Id = inner.next().unwrap().as_str().into();
+        let args = Self::parse_func_args(inner.next().unwrap())?;
+        let body = Self::parse_body(inner.next().unwrap(), context, ftable)?;
+
+        Ok(Function::new(id, args, body))
+    }
+
+    fn parse_func_args(pair: Pair<Rule>) -> ParseResult<Vec<Id>> {
+        pair.into_inner().map(|id| Ok(id.as_str().into())).collect()
+    }
+
+    fn parse_body(
+        pair: Pair<Rule>,
+        parent_context: Rc<RefCell<Context<Value>>>,
+        ftable: Rc<RefCell<Context<Function>>>,
+    ) -> ParseResult<Body> {
+        let context = Rc::new(RefCell::new(Context::<Value>::with_parent(parent_context)));
+        let expressions: Vec<Expression> = pair
+            .into_inner()
+            .map(Self::parse_expression)
+            .collect::<ParseResult<Vec<Expression>>>()?;
+
+        Ok(Body::new(context, ftable, expressions))
     }
 }
 
@@ -122,7 +149,7 @@ impl Expression {
 #[non_exhaustive]
 enum Value {
     Node,
-    Object,
+    Object(HashMap<Id, Value>),
     String(String),
     Boolean(bool),
     List(Vec<Value>),
@@ -134,7 +161,7 @@ impl Value {
     fn ty_name(&self) -> &'static str {
         match self {
             Self::Node => "Node",
-            Self::Object => "Object",
+            Self::Object(_) => "Object",
             Self::String(_) => "String",
             Self::Boolean(_) => "Boolean",
             Self::List(_) => "List",
@@ -146,12 +173,20 @@ impl Value {
 
 #[derive(Debug)]
 struct Function {
-    id: Id,
+    name: Id,
     args: Vec<Id>,
     body: Body,
 }
 
 impl Function {
+    fn new(name: Id, args: Vec<Id>, body: Body) -> Self {
+        Self {
+            name,
+            args,
+            body,
+        }
+    }
+
     fn call_with_args(&self, pair: &Pair<Rule>, args: &[Expression]) -> ParseResult<Value> {
         if self.args.len() != args.len() {
             return Err(custom_error(
@@ -176,16 +211,28 @@ impl Function {
 
 #[derive(Debug)]
 struct Body {
-    statements: Vec<Expression>,
+    expressions: Vec<Expression>,
     context: Rc<RefCell<Context<Value>>>,
     ftable: Rc<RefCell<Context<Function>>>,
 }
 
 impl Body {
+    fn new(
+        context: Rc<RefCell<Context<Value>>>,
+        ftable: Rc<RefCell<Context<Function>>>,
+        expressions: Vec<Expression>,
+    ) -> Self {
+        Self {
+            context,
+            ftable,
+            expressions,
+        }
+    }
+
     fn eval(&self, pair: &Pair<Rule>) -> ParseResult<Value> {
         let ftable = (*self.ftable).borrow();
         let mut context = (*self.context).borrow_mut();
-        let (last, rest) = self.statements.split_last().unwrap();
+        let (last, rest) = self.expressions.split_last().unwrap();
 
         for expression in rest {
             expression.eval(pair, &mut context, &ftable)?;
@@ -219,12 +266,14 @@ impl<T> Context<T> {
         }
     }
 
+    /// Get a value from the table without looking parent tables.
     fn get_non_recursive(&self, id: &Id) -> Option<&T> {
         self.table.get(id)
     }
 }
 
 impl<T: Clone> Context<T> {
+    /// Get a value from the table, looking parent tables if necessary.
     fn get_recursive(&self, id: &Id) -> Option<T> {
         self.table
             .get(id)
@@ -265,14 +314,14 @@ impl Context<Value> {
 
 impl Context<Function> {
     fn add_func_def(&mut self, pair: &Pair<Rule>, func_def: Function) -> ParseResult<()> {
-        match self.table.get_mut(&func_def.id) {
+        match self.table.get_mut(&func_def.name) {
             None => {
-                self.table.insert(func_def.id.clone(), func_def);
+                self.table.insert(func_def.name.clone(), func_def);
                 Ok(())
             }
             Some(_) => Err(custom_error(
                 &pair,
-                &format!("Function {} already defined", func_def.id.0),
+                &format!("Function {} already defined", func_def.name.0),
             )),
         }
     }
@@ -355,9 +404,13 @@ impl Module {
                 (false, pair)
             };
 
-            let function = SparkMLParser::parse_func_def(pair.clone())?;
+            let function = SparkMLParser::parse_func_def(
+                pair.clone(),
+                Rc::clone(&self.context),
+                Rc::clone(&self.ftable),
+            )?;
 
-            let id = function.id.clone();
+            let id = function.name.clone();
 
             (*self.ftable).borrow_mut().add_func_def(&pair, function)?;
 
@@ -569,19 +622,22 @@ mod tests {
 
     #[test]
     fn test_parse_func_def() {
+        let context = Default::default();
+        let ftable = Default::default();
         let pair = SparkMLParser::parse(
-            Rule::export,
-            r#"export fn foo(a, b)
+            Rule::func_def,
+            r#"fn foo(a, b)
                 n = 10
                 20"#,
         )
         .unwrap()
         .next()
-        .unwrap()
-        .into_inner()
-        .next()
         .unwrap();
-        let function = SparkMLParser::parse_func_def(pair).unwrap();
+        let function = SparkMLParser::parse_func_def(pair, context, ftable).unwrap();
+
+        assert_eq!(function.name, "foo".into());
+        assert_eq!(function.args, vec!["a".into(), "b".into()]);
+        assert_eq!(function.body.expressions.len(), 2);
     }
 
     #[test]

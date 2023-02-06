@@ -23,7 +23,7 @@ sub_resource = { "sub" ~ node }
 assignment   = !{ ID ~ "=" ~ NEWLINE* ~ expression }
 
 func_def     = !{ "fn" ~ ID ~ func_args ~ body}
-    func_args = { "(" ~ (ID ~ ",")* ~ ID ~ ")" }
+    func_args = { "(" ~ (ID ~ ("," ~ ID)*)? ~ ")" }
 
 // it's easier to parse this way
 export = _{ export_func | export_var }
