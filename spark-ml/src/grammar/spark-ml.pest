@@ -22,13 +22,13 @@ sub_resource = { "sub" ~ node }
 
 assignment   = !{ ID ~ "=" ~ NEWLINE* ~ expression }
 
-func_def     = !{ "fn" ~ ID ~ func_args ~ body}
+func_def      = !{ "fn" ~ ID ~ func_args ~ body}
     func_args = { "(" ~ (ID ~ ("," ~ ID)*)? ~ ")" }
 
 // it's easier to parse this way
-export = _{ export_func | export_var }
+export          = _{ export_func | export_var }
     export_func = {"export" ~ func_def}
-    export_var = {"export" ~ assignment}
+    export_var  = {"export" ~ assignment}
 
 signal_def    = !{ attr_id ~ "=>" ~ attr_id }
     attr_id   = { ID ~ ("." ~ ID )+ }
@@ -40,6 +40,7 @@ expression = _{ node
                 | object 
                 | if_expr
                 | repeat_expr
+                | attributes_expr
                 | algebraic_expr 
                 | bool_expr 
                 | BOOL
@@ -53,6 +54,8 @@ expression = _{ node
 if_expr    = !{ "if" ~ (bool_expr | BOOL | call) ~ body ~ elseif* ~ ifelse? }
     elseif = { NEWLINE+ ~ "else if" ~ (bool_expr | BOOL | call) ~ body }
     ifelse = { NEWLINE+ ~ "else" ~ body }
+    
+attributes_expr = !{ "+:" ~ attributes }
 
 repeat_expr = !{ "repeat" ~ (INT | call) ~ body }
 
@@ -88,13 +91,13 @@ node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     attributes        = ${ child_attr+ }
     child_attr        = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute) ~ DROP }
     parent_attr       = _{ attribute ~ attributes }
-    attribute         = !{ (METAKEY | KEY) ~ ":" ~ expression? }
+    attribute         = !{ blank? ~ (METAKEY | KEY) ~ ":" ~ expression? }
 
 object           = !{ "object" ~ properties }
     properties   = ${ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
         property = _{ func_def | assignment }
 
-list = !{ "[" ~ NEWLINE* ~ expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)* ~ NEWLINE* ~ "]" }
+list = !{ "[" ~ NEWLINE* ~ (expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ NEWLINE* ~ "]" }
 
 blank              = _{ ((INDENT? ~ COMMENT)? ~ NEWLINE)+ }
 GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
