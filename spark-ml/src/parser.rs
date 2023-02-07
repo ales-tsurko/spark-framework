@@ -17,7 +17,7 @@ use pest_derive::Parser;
 
 static RESERVED_WORDS: Lazy<HashSet<&str>> = Lazy::new(|| {
     [
-        "else", "export", "ext", "false", "fn", "from", "if", "repeat", "sub", "true",
+        "else", "export", "ext", "false", "fn", "from", "if", "object", "repeat", "sub", "true",
     ]
     .into()
 });
@@ -34,7 +34,7 @@ impl SparkMLParser {
     fn parse_expression(pair: Pair<Rule>) -> ParseResult<Expression> {
         match pair.as_rule() {
             Rule::node => todo!(),
-            Rule::object => todo!(),
+            Rule::object => Self::parse_object(pair),
             Rule::assignment => Self::parse_assignment(pair),
             Rule::if_expr => todo!(),
             Rule::repeat_expr => todo!(),
@@ -60,6 +60,11 @@ impl SparkMLParser {
             ))),
             _ => unreachable!(),
         }
+    }
+
+    fn parse_object(pair: Pair<Rule>) -> ParseResult<Expression> {
+        dbg!(pair.as_rule());
+        todo!()
     }
 
     fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Expression> {
@@ -157,6 +162,7 @@ impl SparkMLParser {
 enum Expression {
     Assignment(Id, Box<Expression>),
     Value(Value),
+    Object(Object<Expression>),
     Function(Id, Vec<Expression>),
     Variable(Id),
     If,
@@ -185,7 +191,7 @@ impl Expression {
             }
 
             Expression::Function(id, args) => {
-                if let Some(function) = ftable.table.get(&id) {
+                if let Some(function) = ftable.get_recursive(&id) {
                     function.call_with_args(pair, args)
                 } else {
                     Err(custom_error(
@@ -228,7 +234,7 @@ impl Expression {
 #[non_exhaustive]
 enum Value {
     Node,
-    Object(Rc<HashMap<Id, Value>>),
+    Object(Object<Value>),
     String(String),
     Boolean(bool),
     List(Vector<Value>),
@@ -250,7 +256,42 @@ impl Value {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+struct Object<T: PartialEq> {
+    attributes: Box<Vec<Attribute<T>>>,
+    ftable: Rc<RefCell<Context<Function>>>,
+    context: Rc<RefCell<Context<Value>>>,
+}
+
+impl<T: PartialEq> PartialEq for Object<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.attributes == other.attributes
+            && Rc::ptr_eq(&self.ftable, &other.ftable)
+            && Rc::ptr_eq(&self.context, &other.context)
+    }
+}
+
+impl<T: PartialEq> Object<T> {
+    fn new(
+        attributes: Vec<Attribute<T>>,
+        parent_context: Rc<RefCell<Context<Value>>>,
+        parent_ftable: Rc<RefCell<Context<Function>>>,
+    ) -> Self {
+        Self {
+            attributes: attributes.into(),
+            ftable: Rc::new(RefCell::new(Context::with_parent(parent_ftable))),
+            context: Rc::new(RefCell::new(Context::with_parent(parent_context))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Attribute<T> {
+    Value(Rc<RefCell<T>>),
+    Children(Box<Vec<Attribute<T>>>),
+}
+
+#[derive(Debug, Clone)]
 struct Function {
     name: Id,
     args: Vec<Id>,
@@ -284,9 +325,9 @@ impl Function {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Body {
-    expressions: Vec<Expression>,
+    expressions: Box<Vec<Expression>>,
     context: Rc<RefCell<Context<Value>>>,
     ftable: Rc<RefCell<Context<Function>>>,
 }
@@ -300,7 +341,7 @@ impl Body {
         Self {
             context,
             ftable,
-            expressions,
+            expressions: Box::new(expressions),
         }
     }
 
@@ -824,6 +865,27 @@ mod tests {
                 Value::Boolean(false)
             ])
         );
+    }
+
+    #[test]
+    fn test_expression_object() {
+        let pair = SparkMLParser::parse(
+            Rule::expression,
+            r#"from
+                 n = 1
+
+                 foo: test()
+                 bar:
+                    child: 0.1
+
+                 fn test()
+                    n"#,
+        )
+        .unwrap()
+        .next()
+        .unwrap();
+
+        dbg!(pair);
     }
 
     #[test]

@@ -85,17 +85,16 @@ call            = !{ call_chain | list_index | fn_call | var_call }
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
         node_id_inner = !{ "{" ~ (NUMBER | STRING | call) ~ "}" }
-    attributes        = ${ (top_level_attr | child_attr)+ }
+    attributes        = ${ child_attr+ }
     child_attr        = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute) ~ DROP }
     parent_attr       = _{ attribute ~ attributes }
-    top_level_attr    = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (func_def | assignment) ~ DROP }
-    attribute         = !{ (KEY ~ ":" ~ expression?)
-                            | node
-                            | call}
+    attribute         = !{ (METAKEY | KEY) ~ ":" ~ expression? }
 
-object = !{ "from" ~ attributes }
+object           = !{ "object" ~ properties }
+    properties   = ${ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
+        property = _{ func_def | assignment }
 
-list = !{ "[" ~ NEWLINE* ~ expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)* ~ "]" }
+list = !{ "[" ~ NEWLINE* ~ expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)* ~ NEWLINE* ~ "]" }
 
 blank              = _{ ((INDENT? ~ COMMENT)? ~ NEWLINE)+ }
 GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
@@ -127,7 +126,8 @@ NUMBER             = @{ "-"? ~ INT ~ ("." ~ DIGITS ~ EXP? | EXP)? }
     INT            = @{ "0" | (ASCII_NONZERO_DIGIT ~ DIGITS?) }
     DIGITS         = @{ (ASCII_DIGIT | ("_" ~ ASCII_DIGIT))+ }
     EXP            = @{ ("E" | "e") ~ ("+" | "-")? ~ INT }
-KEY                = @{ "@"? ~ ID }
+METAKEY            = @{ "@" ~ ID }
+KEY                = @{ ID }
 ID                 = @{ LETTER ~ ("_" | LETTER | NUMBER )* }
 INDENT             = _{ (" " | "\t")+ }
 COMMENT            = _{ "#" ~ (!NEWLINE ~ ANY)* }
