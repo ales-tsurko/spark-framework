@@ -37,7 +37,7 @@ animation_def        = !{ attr_id ~ "~" ~ animation_params }
     animation_params = { node_id ~ attributes }
 
 expression = _{ node 
-                | node_anon 
+                | object 
                 | if_expr
                 | repeat_expr
                 | algebraic_expr 
@@ -85,15 +85,15 @@ call            = !{ call_chain | list_index | fn_call | var_call }
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
         node_id_inner = !{ "{" ~ (NUMBER | STRING | call) ~ "}" }
-    attributes        = ${ child_attr+ }
+    attributes        = ${ (top_level_attr | child_attr)+ }
     child_attr        = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute) ~ DROP }
     parent_attr       = _{ attribute ~ attributes }
+    top_level_attr    = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (func_def | assignment) ~ DROP }
     attribute         = !{ (KEY ~ ":" ~ expression?)
-                           | node 
-                           | call 
-                         }
+                            | node
+                            | call}
 
-node_anon = !{ "from" ~ attributes }
+object = !{ "from" ~ attributes }
 
 list = !{ "[" ~ NEWLINE* ~ expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)* ~ "]" }
 

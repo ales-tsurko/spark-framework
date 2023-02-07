@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 
+use im::Vector;
 use once_cell::sync::Lazy;
 use pest::error::{Error, ErrorVariant};
 use pest::iterators::{Pair, Pairs};
@@ -33,7 +34,7 @@ impl SparkMLParser {
     fn parse_expression(pair: Pair<Rule>) -> ParseResult<Expression> {
         match pair.as_rule() {
             Rule::node => todo!(),
-            Rule::node_anon => todo!(),
+            Rule::object => todo!(),
             Rule::assignment => Self::parse_assignment(pair),
             Rule::if_expr => todo!(),
             Rule::repeat_expr => todo!(),
@@ -46,7 +47,7 @@ impl SparkMLParser {
             Rule::list => Ok(Expression::List(
                 pair.into_inner()
                     .map(Self::parse_expression)
-                    .collect::<ParseResult<Vec<Expression>>>()?,
+                    .collect::<ParseResult<Vector<Expression>>>()?,
             )),
             Rule::NUMBER => Ok(Expression::Value(Value::Number(
                 pair.as_str().parse().unwrap(),
@@ -82,6 +83,7 @@ impl SparkMLParser {
     fn parse_call(pair: Pair<Rule>) -> ParseResult<Expression> {
         match pair.as_rule() {
             Rule::call_chain => todo!(),
+
             Rule::list_index => {
                 let mut inner = pair.into_inner();
                 // NOTE: it can be call only, but not wrapped into Rule::call
@@ -94,6 +96,7 @@ impl SparkMLParser {
                     Expression::ListIndex(Box::new(acc), Box::new(index))
                 }))
             }
+
             Rule::fn_call => {
                 let mut inner = pair.into_inner();
                 let id: Id = inner.next().unwrap().as_str().into();
@@ -102,7 +105,9 @@ impl SparkMLParser {
                     .collect::<ParseResult<Vec<Expression>>>()?;
                 Ok(Expression::Function(id, args))
             }
+
             Rule::var_call => Ok(Expression::Variable(pair.into_inner().as_str().into())),
+
             _ => unreachable!(),
         }
     }
@@ -113,7 +118,15 @@ impl SparkMLParser {
         ftable: Rc<RefCell<Context<Function>>>,
     ) -> ParseResult<Function> {
         let mut inner = pair.into_inner();
-        let id: Id = inner.next().unwrap().as_str().into();
+        let id_pair = inner.next().unwrap();
+        if RESERVED_WORDS.contains(id_pair.as_str()) {
+            return Err(custom_error(
+                &id_pair,
+                &format!("{} is a reserved keyword", id_pair.as_str()),
+            ));
+        }
+
+        let id = id_pair.as_str().into();
         let args = Self::parse_func_args(inner.next().unwrap())?;
         let body = Self::parse_body(inner.next().unwrap(), context, ftable)?;
 
@@ -139,7 +152,8 @@ impl SparkMLParser {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 enum Expression {
     Assignment(Id, Box<Expression>),
     Value(Value),
@@ -149,8 +163,9 @@ enum Expression {
     Repeat,
     Algebraic,
     Boolean,
-    List(Vec<Expression>),
+    List(Vector<Expression>),
     ListIndex(Box<Expression>, Box<Expression>),
+    CallChain(Vec<Expression>),
 }
 
 impl Expression {
@@ -183,7 +198,7 @@ impl Expression {
             Expression::List(list) => Ok(Value::List(
                 list.iter()
                     .map(|expr| expr.eval(pair, context, ftable))
-                    .collect::<ParseResult<Vec<Value>>>()?,
+                    .collect::<ParseResult<Vector<Value>>>()?,
             )),
 
             Expression::Variable(id) => context
@@ -213,10 +228,10 @@ impl Expression {
 #[non_exhaustive]
 enum Value {
     Node,
-    Object(HashMap<Id, Value>),
+    Object(Rc<HashMap<Id, Value>>),
     String(String),
     Boolean(bool),
-    List(Vec<Value>),
+    List(Vector<Value>),
     Number(f64),
     GdValue(String),
 }
@@ -590,6 +605,7 @@ fn custom_error(pair: &Pair<Rule>, message: &str) -> Box<Error<Rule>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use im::vector;
 
     #[test]
     fn test_empty_input() {
@@ -802,7 +818,7 @@ mod tests {
                 .unwrap()
                 .eval(&pair, &mut context, &ftable)
                 .unwrap(),
-            Value::List(vec![
+            Value::List(vector![
                 Value::Boolean(true),
                 Value::Boolean(false),
                 Value::Boolean(false)
