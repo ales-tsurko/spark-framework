@@ -178,7 +178,7 @@ pub(crate) fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Expression> {
 
 pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Expression> {
     match pair.as_rule() {
-        Rule::call_chain => todo!(),
+        Rule::property_call => todo!(),
 
         Rule::list_index => {
             let mut inner = pair.into_inner();

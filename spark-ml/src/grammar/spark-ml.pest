@@ -40,7 +40,6 @@ expression = _{ node
                 | object 
                 | if_expr
                 | repeat_expr
-                | attributes_expr
                 | algebraic_expr 
                 | bool_expr 
                 | BOOL
@@ -55,8 +54,6 @@ if_expr    = !{ "if" ~ (bool_expr | BOOL | call) ~ body ~ elseif* ~ ifelse? }
     elseif = { NEWLINE+ ~ "else if" ~ (bool_expr | BOOL | call) ~ body }
     ifelse = { NEWLINE+ ~ "else" ~ body }
     
-attributes_expr = !{ "+:" ~ attributes }
-
 repeat_expr = !{ "repeat" ~ (INT | call) ~ body }
 
 body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
@@ -79,22 +76,20 @@ bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_
         comparison   = { comp_value ~ COMP_OP ~ comp_value }
         comp_value   = _{ NUMBER | STRING | call }
 
-call            = !{ call_chain | list_index | fn_call | var_call }
-    fn_call     = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
-    var_call    = { ID }
-    list_index  = { (fn_call | var_call) ~ ("[" ~ (NUMBER | call) ~ "]")+ }
-    call_chain  = { (list_index | fn_call | var_call) ~ (NEWLINE* ~ "." ~ (list_index | fn_call | var_call))+ }
+call              = !{ property_call | list_index | fn_call | var_call }
+    fn_call       = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
+    var_call      = { ID }
+    list_index    = { (fn_call | var_call) ~ ("[" ~ (NUMBER | call) ~ "]")+ }
+    property_call = { (list_index | fn_call | var_call) ~ (NEWLINE* ~ "." ~ (list_index | fn_call | var_call))+ }
 
-node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
+node                  = !{ node_id ~ "from" ~ node_id ~ attribute? ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
         node_id_inner = !{ "{" ~ (NUMBER | STRING | call) ~ "}" }
-    attributes        = ${ child_attr+ }
-    child_attr        = _{ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ (parent_attr | attribute) ~ DROP }
-    parent_attr       = _{ attribute ~ attributes }
-    attribute         = !{ blank? ~ (METAKEY | KEY) ~ ":" ~ expression? }
+    attributes        = ${ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ attribute ~ (blank ~ PEEK_ALL ~ attribute)* ~ DROP }
+    attribute         = !{ (METAKEY | KEY) ~ ":" ~ (attributes | expression) }
 
-object           = !{ "object" ~ properties }
-    properties   = ${ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
+object           = !{ "{" ~ attribute? ~ attributes? ~ properties? ~ blank? ~ "}" }
+    properties   = ${ property? ~ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
         property = _{ func_def | assignment }
 
 list = !{ "[" ~ NEWLINE* ~ (expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ NEWLINE* ~ "]" }

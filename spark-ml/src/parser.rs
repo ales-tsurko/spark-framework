@@ -14,7 +14,7 @@ mod value;
 
 static RESERVED_WORDS: Lazy<HashSet<&str>> = Lazy::new(|| {
     [
-        "else", "export", "ext", "false", "fn", "from", "if", "object", "repeat", "sub", "true",
+        "else", "export", "ext", "false", "fn", "from", "if", "repeat", "sub", "true",
     ]
     .into()
 });
