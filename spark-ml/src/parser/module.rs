@@ -60,7 +60,12 @@ impl Module {
             match pair.as_rule() {
                 Rule::ext_resource => module.add_ext_resource(pair)?,
                 Rule::assignment => {
-                    expression::parse_assignment(pair.clone())?.eval(
+                    expression::parse_assignment(
+                        pair.clone(),
+                        Rc::clone(&module.context),
+                        Rc::clone(&module.ftable),
+                    )?
+                    .eval(
                         &pair,
                         &mut (*module.context).borrow_mut(),
                         &(*module.ftable).borrow(),

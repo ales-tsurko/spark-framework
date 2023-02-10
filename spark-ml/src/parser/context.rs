@@ -36,6 +36,18 @@ impl<T> Context<T> {
     pub(crate) fn get_non_recursive(&self, id: &Id) -> Option<&T> {
         self.table.get(id)
     }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
+        self.table.values()
+    }
+    
+    pub(crate) fn table(&self) -> &HashMap<Id, T> {
+        &self.table
+    }
+
+    pub(crate) fn set_table(&mut self, table: HashMap<Id, T>) {
+        self.table = table;
+    }
 }
 
 impl<T: Clone> Context<T> {

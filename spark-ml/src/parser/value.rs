@@ -1,4 +1,8 @@
+//! Value is a concrete data structure.
+
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
 
 use im::Vector;
@@ -35,38 +39,133 @@ impl Value {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Object<T: PartialEq> {
-    attributes: Box<Vec<Attribute<T>>>,
-    ftable: Rc<RefCell<Context<Function>>>,
-    context: Rc<RefCell<Context<Value>>>,
+pub(crate) struct Object<T> {
+    attributes: Rc<Attributes<T>>,
+    body: Body,
 }
 
 impl<T: PartialEq> PartialEq for Object<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.attributes == other.attributes
-            && Rc::ptr_eq(&self.ftable, &other.ftable)
-            && Rc::ptr_eq(&self.context, &other.context)
+        Rc::ptr_eq(&self.attributes, &other.attributes)
+            && Rc::ptr_eq(&self.body.context(), &other.body.context())
+            && Rc::ptr_eq(&self.body.ftable(), &other.body.ftable())
     }
 }
 
-impl<T: PartialEq> Object<T> {
-    fn new(
-        attributes: Vec<Attribute<T>>,
-        parent_context: Rc<RefCell<Context<Value>>>,
-        parent_ftable: Rc<RefCell<Context<Function>>>,
-    ) -> Self {
-        Self {
-            attributes: attributes.into(),
-            ftable: Rc::new(RefCell::new(Context::with_parent(parent_ftable))),
-            context: Rc::new(RefCell::new(Context::with_parent(parent_context))),
+impl<T> Object<T> {
+    pub(crate) fn new(attributes: Rc<Attributes<T>>, body: Body) -> Self {
+        Self { attributes, body }
+    }
+    
+    pub(crate) fn attributes(&self) -> &Attributes<T> {
+        &self.attributes
+    }
+    
+    pub(crate) fn body(&self) -> &Body {
+        &self.body
+    }
+}
+
+impl Object<Expression> {
+    pub(crate) fn eval(&self, pair: &Pair<Rule>) -> ParseResult<Object<Value>> {
+        let context = self.body.context();
+        let ftable = self.body.ftable();
+        let mut context = context.borrow_mut();
+        let ftable = ftable.borrow();
+        let _ = self.body.eval(pair)?;
+        let attributes = Rc::new(self.attributes.eval(pair, &mut context, &ftable)?);
+        Ok(Object::new(attributes, self.body.clone()))
+    }
+}
+
+impl Object<Value> {
+    /// Property access is just a non-recursive call in the context of the object.
+    pub(crate) fn access_propery(&self, pair: &Pair<Rule>, call: Expression) -> ParseResult<Value> {
+        call.eval(
+            pair,
+            &mut self.body.context().borrow_mut(),
+            &self.body.ftable().borrow(),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Attributes<T>(HashMap<Key, Attribute<T>>);
+
+impl<T> Default for Attributes<T> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<T> Attributes<T> {
+    pub(crate) fn insert(&mut self, key: Key, value: Attribute<T>) {
+        let _ = self.0.insert(key, value);
+    }
+    
+    pub(crate) fn get(&self, key: &Key) -> Option<&Attribute<T>> {
+        self.0.get(key)
+    }
+    
+    pub(crate) fn table(&self) -> &HashMap<Key, Attribute<T>> {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Key {
+    Key(Id),
+    MetaKey(Id),
+}
+
+impl Attributes<Expression> {
+    pub(crate) fn eval(
+        &self,
+        pair: &Pair<Rule>,
+        context: &mut Context<Value>,
+        ftable: &Context<Function>,
+    ) -> ParseResult<Attributes<Value>> {
+        let mut table = HashMap::new();
+
+        for (key, attr) in &self.0 {
+            table.insert(key.clone(), attr.eval(pair, context, ftable)?);
+        }
+
+        Ok(Attributes(table))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Attribute<T> {
+    Value(Rc<T>),
+    Attributes(Rc<Attributes<T>>),
+}
+
+impl Attribute<Expression> {
+    pub(crate) fn eval(
+        &self,
+        pair: &Pair<Rule>,
+        context: &mut Context<Value>,
+        ftable: &Context<Function>,
+    ) -> ParseResult<Attribute<Value>> {
+        match self {
+            Self::Value(expr) => Ok(Attribute::Value(Rc::new(expr.eval(pair, context, ftable)?))),
+
+            Self::Attributes(children) => Ok(Attribute::Attributes(Rc::new(
+                children.eval(pair, context, ftable)?,
+            ))),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Attribute<T> {
-    Value(Rc<RefCell<T>>),
-    Children(Box<Vec<Attribute<T>>>),
+impl<T> PartialEq for Attribute<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Value(a), Self::Value(b)) => Rc::ptr_eq(a, b),
+            (Self::Attributes(a), Self::Attributes(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,9 +193,9 @@ impl Function {
         }
 
         {
-            let context = self.body.get_context();
+            let context = self.body.context();
             let mut context = context.borrow_mut();
-            let ftable = self.body.get_ftable();
+            let ftable = self.body.ftable();
             let ftable = ftable.borrow();
 
             for (n, arg) in args.iter().enumerate() {
@@ -106,6 +205,14 @@ impl Function {
         }
 
         self.body.eval(pair)
+    }
+    
+    pub(crate) fn name(&self) -> &Id {
+        &self.name
+    }
+
+    pub(crate) fn args(&self) -> &[Id] {
+        &self.args
     }
 }
 
