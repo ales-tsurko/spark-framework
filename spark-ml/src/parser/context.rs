@@ -10,61 +10,46 @@ use crate::parser::value::{Id, Value};
 use crate::parser::{custom_error, ParseResult, Rule};
 
 /// Context is a scoped storage for variables and functions.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Context {
     variables: Table<Value>,
     functions: Table<FunctionDef>,
-    parent: Option<Rc<RefCell<Self>>>,
 }
 
 impl Context {
-    pub(crate) fn with_parent(parent: Rc<RefCell<Self>>) -> Self {
+    pub(crate) fn with_parent(parent: Self) -> Self {
+        let variables = Table::with_parent(parent.variables);
+        let functions = Table::with_parent(parent.functions);
         Self {
-            parent: Some(parent),
-            ..Default::default()
+            variables,
+            functions,
         }
     }
 
     /// Get a variable without looking parent tables.
-    pub(crate) fn var_non_recursive(&self, id: &Id) -> Option<&Value> {
-        self.variables.0.get(id)
+    pub(crate) fn var_non_recursive(&self, id: &Id) -> Option<Value> {
+        self.variables.table.borrow().get(id).cloned()
     }
 
     /// Get a function definition without looking parent tables.
-    pub(crate) fn func_non_recursive(&self, id: &Id) -> Option<&Value> {
-        self.variables.0.get(id)
+    pub(crate) fn func_non_recursive(&self, id: &Id) -> Option<FunctionDef> {
+        self.functions.table.borrow().get(id).cloned()
     }
 
-    /// Get a variable looking parent tables if necessary.
     pub(crate) fn var_recursive(&self, id: &Id) -> Option<Value> {
-        self.variables
-            .get(id)
-            .cloned()
-            .or_else(|| {
-                self.parent
-                    .as_ref()
-                    .and_then(|parent: &Rc<RefCell<Self>>| (*parent).borrow().var_recursive(id))
-            })
-            .clone()
+        self.variables.get_recursive(id)
     }
     /// Get a variable looking parent tables if necessary.
     pub(crate) fn func_recursive(&self, id: &Id) -> Option<FunctionDef> {
-        self.functions
-            .get(id)
-            .cloned()
-            .or_else(|| {
-                self.parent
-                    .as_ref()
-                    .and_then(|parent: &Rc<RefCell<Self>>| (*parent).borrow().func_recursive(id))
-            })
-            .clone()
+        self.functions.get_recursive(id)
     }
 
     /// Add a variable to the context.
-    pub(crate) fn add_var(&mut self, pair: &Pair<Rule>, id: Id, value: Value) -> ParseResult<()> {
-        match self.variables.0.get_mut(&id) {
+    pub(crate) fn add_var(&self, pair: &Pair<Rule>, id: Id, value: Value) -> ParseResult<()> {
+        let mut table = self.variables.table.borrow_mut();
+        match table.get_mut(&id) {
             None => {
-                self.variables.0.insert(id, value);
+                table.insert(id, value);
                 Ok(())
             }
             Some(val) => {
@@ -85,10 +70,11 @@ impl Context {
     }
 
     /// Add a function definition.
-    pub(crate) fn add_func(&mut self, pair: &Pair<Rule>, func_def: FunctionDef) -> ParseResult<()> {
-        match self.functions.0.get_mut(&func_def.name) {
+    pub(crate) fn add_func(&self, pair: &Pair<Rule>, func_def: FunctionDef) -> ParseResult<()> {
+        let mut table = self.functions.table.borrow_mut();
+        match table.get_mut(&func_def.name) {
             None => {
-                self.functions.0.insert(func_def.name.clone(), func_def);
+                table.insert(func_def.name.clone(), func_def);
                 Ok(())
             }
             Some(_) => Err(custom_error(
@@ -97,40 +83,45 @@ impl Context {
             )),
         }
     }
-
-    pub(crate) fn variables(&self) -> &Table<Value> {
-        &self.variables
-    }
-
-    pub(crate) fn functions(&self) -> &Table<FunctionDef> {
-        &self.functions
-    }
-
-    pub(crate) fn set_variabels(&mut self, table: Table<Value>) {
-        self.variables = table;
-    }
-
-    pub(crate) fn set_functions(&mut self, table: Table<FunctionDef>) {
-        self.functions = table;
-    }
 }
 
-#[derive(Debug)]
-pub(crate) struct Table<T>(HashMap<Id, T>);
-
-impl<T> Default for Table<T> {
-    fn default() -> Self {
-        Self(HashMap::new())
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct Table<T> {
+    table: Rc<RefCell<HashMap<Id, T>>>,
+    parent: Option<Box<Self>>,
 }
 
 impl<T> Table<T> {
-    pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
-        self.0.values()
+    pub(crate) fn with_parent(parent: Self) -> Self {
+        Self {
+            table: Default::default(),
+            parent: Some(Box::new(parent)),
+        }
     }
+}
 
-    pub(crate) fn get(&self, id: &Id) -> Option<&T> {
-        self.0.get(id)
+impl<T: Clone> Table<T> {
+    /// Get a value looking parent tables if necessary.
+    pub(crate) fn get_recursive(&self, id: &Id) -> Option<T> {
+        self.table
+            .borrow()
+            .get(id)
+            .cloned()
+            .or_else(|| {
+                self.parent
+                    .as_ref()
+                    .and_then(|parent: &Box<Self>| parent.get_recursive(id))
+            })
+            .clone()
+    }
+}
+
+impl<T> Default for Table<T> {
+    fn default() -> Self {
+        Self {
+            table: Default::default(),
+            parent: None,
+        }
     }
 }
 
@@ -143,8 +134,7 @@ mod tests {
 
     #[test]
     fn test_context() {
-        let context = Rc::new(RefCell::new(Context::default()));
-        let mut context_ref = context.borrow_mut();
+        let context = Context::default();
         // we need it just to pass something
         let pair = SparkMLParser::parse(Rule::module, "\n")
             .unwrap()
@@ -152,39 +142,37 @@ mod tests {
             .unwrap();
 
         // assign a variable
-        assert!(context_ref.var_non_recursive(&"foo".into()).is_none());
+        assert!(context.var_non_recursive(&"foo".into()).is_none());
 
-        assert!(context_ref
+        assert!(context
             .add_var(&pair, "foo".into(), Value::Boolean(true))
             .is_ok());
 
         assert!(matches!(
-            context_ref.var_non_recursive(&"foo".into()),
+            context.var_non_recursive(&"foo".into()),
             Some(Value::Boolean(true))
         ));
 
         // re-assign a variable
-        assert!(context_ref
+        assert!(context
             .add_var(&pair, "foo".into(), Value::Boolean(false))
             .is_ok());
 
         assert!(matches!(
-            context_ref.var_non_recursive(&"foo".into()),
+            context.var_non_recursive(&"foo".into()),
             Some(Value::Boolean(false))
         ));
 
         // type mismatch
-        assert!(context_ref
+        assert!(context
             .add_var(&pair, "foo".into(), Value::Number(1.0))
             .is_err());
 
         // recursive lookup
-        drop(context_ref);
-        let child = Rc::new(RefCell::new(Context::with_parent(context.clone())));
-        let child_ref = child.borrow();
+        let child = Context::with_parent(context.clone());
 
         assert_eq!(
-            child_ref.var_recursive(&"foo".into()),
+            child.var_recursive(&"foo".into()),
             Some(Value::Boolean(false))
         );
     }

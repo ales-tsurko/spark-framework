@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::str::FromStr;
 
 use pest::error::Error;
@@ -17,7 +15,7 @@ use crate::parser::{custom_error, ParseResult, Rule, SparkMLParser};
 pub(crate) struct Module {
     ext_resources: HashMap<ExtResource, usize>,
     ext_res_incr: Box<dyn FnMut() -> usize>,
-    context: Rc<RefCell<Context>>,
+    context: Context,
     exports_func: HashSet<Id>,
     exports_var: HashSet<Id>,
 }

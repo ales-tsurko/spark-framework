@@ -14,9 +14,6 @@ use crate::parser::{custom_error, ParseResult, Rule, RESERVED_WORDS};
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub(crate) enum Ast {
-    // Assignment is actually a statement, but we need to treat it as an expression in case of
-    // assignments inside a function, they can be dependent on the function arguments in that case.
-    // So we reevaluate them each time, we call the function.
     Assignment(Id, Box<Ast>),
     Object(Object<Ast>),
     Value(Value),
@@ -33,31 +30,25 @@ pub(crate) enum Ast {
 }
 
 impl Ast {
-    pub(crate) fn eval(
-        &self,
-        pair: &Pair<Rule>,
-        context: Rc<RefCell<Context>>,
-    ) -> ParseResult<Value> {
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
         match self {
             Ast::Value(val) => Ok(val.clone()),
 
             Ast::Assignment(id, expression) => {
                 let value = expression.eval(pair, context.clone())?;
-                (*context)
-                    .borrow_mut()
-                    .add_var(pair, id.clone(), value.clone())?;
+                context.add_var(pair, id.clone(), value.clone())?;
                 Ok(value)
             }
 
             Ast::FunctionDef(func) => {
-                (*context).borrow_mut().add_func(pair, func.clone())?;
+                context.add_func(pair, func.clone())?;
                 Ok(Value::Boolean(true))
             }
 
             Ast::Object(object) => Ok(Value::Object(object.eval(pair, context.clone())?)),
 
             Ast::FunctionCall(id, args) => {
-                if let Some(func) = (*context).borrow_mut().func_recursive(&id) {
+                if let Some(func) = context.func_recursive(&id) {
                     func.eval(pair, args, context.clone())
                 } else {
                     Err(custom_error(
@@ -73,8 +64,7 @@ impl Ast {
                     .collect::<ParseResult<Vector<Value>>>()?,
             )),
 
-            Ast::Variable(id) => (*context)
-                .borrow_mut()
+            Ast::Variable(id) => context
                 .var_recursive(id)
                 .ok_or_else(|| custom_error(pair, &format!("'{}' not found", id.as_str()))),
 
@@ -98,12 +88,8 @@ impl Ast {
 }
 
 impl Object<Ast> {
-    pub(crate) fn eval(
-        &self,
-        pair: &Pair<Rule>,
-        context: Rc<RefCell<Context>>,
-    ) -> ParseResult<Object<Value>> {
-        let context = Rc::new(RefCell::new(Context::with_parent(context.clone())));
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Object<Value>> {
+        let context = Context::with_parent(context.clone());
         let _ = self.body().eval(pair, context.clone())?;
         let attributes = Rc::new(self.attributes().eval(pair, context)?);
         Ok(Object::new(attributes, self.body().clone()))
@@ -114,7 +100,7 @@ impl Attributes<Ast> {
     pub(crate) fn eval(
         &self,
         pair: &Pair<Rule>,
-        context: Rc<RefCell<Context>>,
+        context: Context,
     ) -> ParseResult<Attributes<Value>> {
         let mut table = HashMap::new();
 
@@ -130,7 +116,7 @@ impl Attribute<Ast> {
     pub(crate) fn eval(
         &self,
         pair: &Pair<Rule>,
-        context: Rc<RefCell<Context>>,
+        context: Context,
     ) -> ParseResult<Attribute<Value>> {
         match self {
             Self::Value(expr) => Ok(Attribute::Value(Rc::new(expr.eval(pair, context)?))),
@@ -158,7 +144,7 @@ impl FunctionDef {
         &self,
         pair: &Pair<Rule>,
         args: &[Ast],
-        context: Rc<RefCell<Context>>,
+        context: Context,
     ) -> ParseResult<Value> {
         if self.args.len() != args.len() {
             return Err(custom_error(
@@ -167,23 +153,14 @@ impl FunctionDef {
             ));
         }
 
-        let context = Rc::new(RefCell::new(Context::with_parent(context.clone())));
-        let mut context_ref = context.borrow_mut();
+        let context = Context::with_parent(context.clone());
 
         for (n, arg) in args.iter().enumerate() {
             let value = arg.eval(pair, context.clone())?;
-            context_ref.add_var(pair, self.args[n].clone(), value)?;
+            context.add_var(pair, self.args[n].clone(), value)?;
         }
 
         self.body.eval(pair, context.clone())
-    }
-
-    pub(crate) fn name(&self) -> &Id {
-        &self.name
-    }
-
-    pub(crate) fn args(&self) -> &[Id] {
-        &self.args
     }
 }
 
@@ -199,11 +176,7 @@ impl Body {
         }
     }
 
-    pub(crate) fn eval(
-        &self,
-        pair: &Pair<Rule>,
-        context: Rc<RefCell<Context>>,
-    ) -> ParseResult<Value> {
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
         let (last, rest) = self.expressions.split_last().unwrap();
 
         for expression in rest {
@@ -211,10 +184,6 @@ impl Body {
         }
 
         last.eval(pair, context)
-    }
-
-    pub(crate) fn expressions(&self) -> &Vec<Ast> {
-        &self.expressions
     }
 }
 
@@ -422,7 +391,7 @@ mod tests {
         if let Ast::FunctionDef(function) = parse_func_def(pair).unwrap() {
             assert_eq!(function.name, "foo".into());
             assert_eq!(function.args, vec!["a".into(), "b".into()]);
-            assert_eq!(function.body.expressions().len(), 2);
+            assert_eq!(function.body.expressions.len(), 2);
         } else {
             panic!("Expected function definition");
         }
@@ -469,12 +438,12 @@ mod tests {
                 _ => panic!("Expected value"),
             }
 
-            match object.body().expressions().as_slice() {
+            match object.body().expressions.as_slice() {
                 [Ast::Assignment(id, expr), Ast::FunctionDef(func)] => {
                     assert_eq!(id, &"n".into());
                     assert!(matches!(expr.as_ref(), &Ast::Value(Value::Number(_))));
-                    assert_eq!(func.name(), &"test".into());
-                    assert_eq!(func.args(), vec![]);
+                    assert_eq!(func.name, "test".into());
+                    assert_eq!(func.args, vec![]);
                 }
                 _ => panic!("Expected assignment"),
             }
@@ -485,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_assignment() {
-        let context = Rc::new(RefCell::new(Context::default()));
+        let context = Context::default();
         let pair = SparkMLParser::parse(Rule::assignment, "foo = true")
             .unwrap()
             .next()
@@ -496,13 +465,10 @@ mod tests {
             Value::Boolean(true)
         );
 
-        {
-            let context_ref = context.borrow();
-            assert_eq!(
-                context_ref.var_non_recursive(&"foo".into()).unwrap(),
-                &Value::Boolean(true)
-            );
-        }
+        assert_eq!(
+            context.var_non_recursive(&"foo".into()).unwrap(),
+            Value::Boolean(true)
+        );
 
         // using reserved keyword is not allowed
         let pair = SparkMLParser::parse(Rule::assignment, "true = false")
@@ -514,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_call() {
-        let context = Rc::new(RefCell::new(Context::default()));
+        let context = Context::default();
         let pair = SparkMLParser::parse(Rule::call, "foo")
             .unwrap()
             .next()
@@ -575,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_list() {
-        let context = Rc::new(RefCell::new(Context::default()));
+        let context = Context::default();
         let pair = SparkMLParser::parse(Rule::expression, "[true,false,false]")
             .unwrap()
             .next()
@@ -595,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_expression_value() {
-        let context = Rc::new(RefCell::new(Context::default()));
+        let context = Context::default();
         let pair = SparkMLParser::parse(Rule::expression, "1")
             .unwrap()
             .next()
