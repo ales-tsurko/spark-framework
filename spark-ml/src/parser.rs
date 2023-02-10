@@ -7,8 +7,8 @@ use pest::error::{Error, ErrorVariant};
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
+mod ast;
 mod context;
-mod expression;
 mod module;
 mod value;
 

@@ -9,16 +9,15 @@ use pest::iterators::{Pair, Pairs};
 use pest::Parser;
 
 use crate::parser::context::Context;
-use crate::parser::value::{Function, Id, Value};
+use crate::parser::value::Id;
+use crate::parser::{ast, ast::Ast};
 use crate::parser::{custom_error, ParseResult, Rule, SparkMLParser};
-use crate::parser::{expression, value};
 
 /// Represents a SparkML module.
 pub(crate) struct Module {
     ext_resources: HashMap<ExtResource, usize>,
     ext_res_incr: Box<dyn FnMut() -> usize>,
-    context: Rc<RefCell<Context<Value>>>,
-    ftable: Rc<RefCell<Context<Function>>>,
+    context: Rc<RefCell<Context>>,
     exports_func: HashSet<Id>,
     exports_var: HashSet<Id>,
 }
@@ -29,7 +28,6 @@ impl Default for Module {
             ext_resources: HashMap::new(),
             ext_res_incr: new_incr(),
             context: Default::default(),
-            ftable: Default::default(),
             exports_func: Default::default(),
             exports_var: Default::default(),
         }
@@ -60,16 +58,7 @@ impl Module {
             match pair.as_rule() {
                 Rule::ext_resource => module.add_ext_resource(pair)?,
                 Rule::assignment => {
-                    expression::parse_assignment(
-                        pair.clone(),
-                        Rc::clone(&module.context),
-                        Rc::clone(&module.ftable),
-                    )?
-                    .eval(
-                        &pair,
-                        &mut (*module.context).borrow_mut(),
-                        &(*module.ftable).borrow(),
-                    )?;
+                    ast::parse_assignment(pair.clone())?.eval(&pair, module.context.clone())?;
                     ()
                 }
                 Rule::export_var => todo!(),
@@ -77,8 +66,6 @@ impl Module {
                 Rule::repeat_expr => todo!(),
                 Rule::call => todo!(),
                 Rule::node => todo!(),
-                Rule::signal_def => todo!(),
-                Rule::animation_def => todo!(),
                 Rule::sub_resource => todo!(),
                 _ => (),
             }
@@ -95,18 +82,17 @@ impl Module {
                 (false, pair)
             };
 
-            let function = value::parse_func_def(
-                pair.clone(),
-                Rc::clone(&self.context),
-                Rc::clone(&self.ftable),
-            )?;
+            let expr = ast::parse_func_def(pair.clone())?;
+            match expr {
+                Ast::FunctionDef(ref func) => {
+                    let id = func.name.clone();
+                    expr.eval(&pair, self.context.clone())?;
 
-            let id = function.name.clone();
-
-            (*self.ftable).borrow_mut().add_func_def(&pair, function)?;
-
-            if exports {
-                self.exports_func.insert(id);
+                    if exports {
+                        self.exports_func.insert(id);
+                    }
+                }
+                _ => unreachable!(),
             }
         }
 
