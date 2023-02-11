@@ -26,22 +26,20 @@ impl Context {
         }
     }
 
-    /// Get a variable without looking parent tables.
-    pub(crate) fn var_non_recursive(&self, id: &Id) -> Option<Value> {
-        self.variables.table.borrow().get(id).cloned()
+    /// Clone context without parent tables.
+    pub(crate) fn shallow_clone(&self) -> Self {
+        Self {
+            variables: self.variables.shallow_clone(),
+            functions: self.functions.shallow_clone(),
+        }
     }
 
-    /// Get a function definition without looking parent tables.
-    pub(crate) fn func_non_recursive(&self, id: &Id) -> Option<FunctionDef> {
-        self.functions.table.borrow().get(id).cloned()
+    pub(crate) fn var(&self, id: &Id) -> Option<Value> {
+        self.variables.get(id)
     }
 
-    pub(crate) fn var_recursive(&self, id: &Id) -> Option<Value> {
-        self.variables.get_recursive(id)
-    }
-
-    pub(crate) fn func_recursive(&self, id: &Id) -> Option<FunctionDef> {
-        self.functions.get_recursive(id)
+    pub(crate) fn func(&self, id: &Id) -> Option<FunctionDef> {
+        self.functions.get(id)
     }
 
     /// Add a variable to the context.
@@ -98,11 +96,18 @@ impl<T> Table<T> {
             parent: Some(Box::new(parent)),
         }
     }
+
+    pub(crate) fn shallow_clone(&self) -> Self {
+        Self {
+            table: self.table.clone(),
+            parent: None,
+        }
+    }
 }
 
 impl<T: Clone> Table<T> {
     /// Get a value looking parent tables if necessary.
-    pub(crate) fn get_recursive(&self, id: &Id) -> Option<T> {
+    pub(crate) fn get(&self, id: &Id) -> Option<T> {
         self.table
             .borrow()
             .get(id)
@@ -110,7 +115,7 @@ impl<T: Clone> Table<T> {
             .or_else(|| {
                 self.parent
                     .as_ref()
-                    .and_then(|parent: &Box<Self>| parent.get_recursive(id))
+                    .and_then(|parent: &Box<Self>| parent.get(id))
             })
             .clone()
     }
@@ -142,14 +147,14 @@ mod tests {
             .unwrap();
 
         // assign a variable
-        assert!(context.var_non_recursive(&"foo".into()).is_none());
+        assert!(context.var(&"foo".into()).is_none());
 
         assert!(context
             .add_var(&pair, "foo".into(), Value::Boolean(true))
             .is_ok());
 
         assert!(matches!(
-            context.var_non_recursive(&"foo".into()),
+            context.var(&"foo".into()),
             Some(Value::Boolean(true))
         ));
 
@@ -159,7 +164,7 @@ mod tests {
             .is_ok());
 
         assert!(matches!(
-            context.var_non_recursive(&"foo".into()),
+            context.var(&"foo".into()),
             Some(Value::Boolean(false))
         ));
 
@@ -171,9 +176,10 @@ mod tests {
         // recursive lookup
         let child = Context::with_parent(context.clone());
 
-        assert_eq!(
-            child.var_recursive(&"foo".into()),
-            Some(Value::Boolean(false))
-        );
+        assert_eq!(child.var(&"foo".into()), Some(Value::Boolean(false)));
+        
+        // make it non-recursive
+        let child = child.shallow_clone();
+        assert!(child.var(&"foo".into()).is_none());
     }
 }

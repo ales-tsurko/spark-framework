@@ -80,7 +80,7 @@ call              = !{ property_call | list_index | fn_call | var_call }
     fn_call       = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
     var_call      = { ID }
     list_index    = { (fn_call | var_call) ~ ("[" ~ (NUMBER | call) ~ "]")+ }
-    property_call = { (list_index | fn_call | var_call) ~ (NEWLINE* ~ "." ~ (list_index | fn_call | var_call))+ }
+    property_call = { (list_index | fn_call | var_call) ~ (NEWLINE* ~ "." ~ (property_call | list_index | fn_call | var_call)) }
 
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
@@ -89,7 +89,7 @@ node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     attribute         = !{ (METAKEY | KEY) ~ ":" ~ (attributes | expression) ~ INDENT? }
 
 object           = !{ "{" ~ attributes? ~ properties? ~ blank? ~ "}" }
-    properties   = ${ property? ~ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
+    properties   = ${ property? ~ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK ~ property)* ~ DROP }
         property = _{ (func_def | assignment) ~ INDENT? }
 
 list = !{ "[" ~ NEWLINE* ~ (expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ NEWLINE* ~ "]" }

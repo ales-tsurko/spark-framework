@@ -5,8 +5,10 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use im::Vector;
+use pest::ParseResult;
 
 use crate::parser::ast::Body;
+use crate::parser::context::Context;
 
 #[derive(Debug, PartialEq, Clone)]
 #[non_exhaustive]
@@ -37,6 +39,7 @@ impl Value {
 #[derive(Debug, Clone)]
 pub(crate) struct Object<T> {
     attributes: Rc<Attributes<T>>,
+    context: Context,
     body: Body,
 }
 
@@ -47,8 +50,12 @@ impl<T: PartialEq> PartialEq for Object<T> {
 }
 
 impl<T> Object<T> {
-    pub(crate) fn new(attributes: Rc<Attributes<T>>, body: Body) -> Self {
-        Self { attributes, body }
+    pub(crate) fn new(attributes: Rc<Attributes<T>>, body: Body, context: Context) -> Self {
+        Self {
+            attributes,
+            body,
+            context,
+        }
     }
 
     pub(crate) fn attributes(&self) -> &Attributes<T> {
@@ -57,6 +64,10 @@ impl<T> Object<T> {
 
     pub(crate) fn body(&self) -> &Body {
         &self.body
+    }
+    
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
     }
 }
 
