@@ -87,6 +87,12 @@ impl<T> Attributes<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for Attributes<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Key {
     Key(Id),
@@ -99,11 +105,11 @@ pub(crate) enum Attribute<T> {
     Attributes(Rc<Attributes<T>>),
 }
 
-impl<T> PartialEq for Attribute<T> {
+impl<T: PartialEq> PartialEq for Attribute<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Value(a), Self::Value(b)) => Rc::ptr_eq(a, b),
-            (Self::Attributes(a), Self::Attributes(b)) => Rc::ptr_eq(a, b),
+            (Self::Value(a), Self::Value(b)) => a == b,
+            (Self::Attributes(a), Self::Attributes(b)) => a == b,
             _ => false,
         }
     }

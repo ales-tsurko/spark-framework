@@ -39,7 +39,7 @@ impl Context {
     pub(crate) fn var_recursive(&self, id: &Id) -> Option<Value> {
         self.variables.get_recursive(id)
     }
-    /// Get a variable looking parent tables if necessary.
+
     pub(crate) fn func_recursive(&self, id: &Id) -> Option<FunctionDef> {
         self.functions.get_recursive(id)
     }

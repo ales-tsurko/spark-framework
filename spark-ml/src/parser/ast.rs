@@ -1,6 +1,4 @@
 //! Abstract syntax tree.
-
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -10,6 +8,193 @@ use pest::iterators::Pair;
 use crate::parser::context::Context;
 use crate::parser::value::{Attribute, Attributes, Id, Key, Object, Value};
 use crate::parser::{custom_error, ParseResult, Rule, RESERVED_WORDS};
+
+pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
+    match pair.as_rule() {
+        Rule::node => todo!(),
+        Rule::object => parse_object(pair),
+        Rule::assignment => parse_assignment(pair),
+        Rule::if_expr => todo!(),
+        Rule::repeat_expr => todo!(),
+        Rule::algebraic_expr => todo!(),
+        Rule::bool_expr => todo!(),
+        Rule::BOOL => Ok(Ast::Value(Value::Boolean(pair.as_str().parse().unwrap()))),
+        Rule::call => parse_call(pair.into_inner().next().unwrap()),
+        Rule::list => Ok(Ast::List(
+            pair.into_inner()
+                .map(|item| parse_expression(item))
+                .collect::<ParseResult<Vector<Ast>>>()?,
+        )),
+        Rule::NUMBER => Ok(Ast::Value(Value::Number(pair.as_str().parse().unwrap()))),
+        Rule::STRING => Ok(Ast::Value(Value::String(
+            pair.into_inner().next().unwrap().as_str().into(),
+        ))),
+        Rule::GD_VALUE => Ok(Ast::Value(Value::GdValue(
+            pair.into_inner().next().unwrap().as_str().into(),
+        ))),
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
+    assert!(matches!(pair.as_rule(), Rule::object));
+
+    let pairs = pair.into_inner();
+
+    let (attributes, properties) = pairs.fold(
+        (Ok(Attributes::default()), Ok(Vec::new())),
+        |(mut attributes, mut properties), pair| {
+            match pair.as_rule() {
+                Rule::attributes => {
+                    attributes = parse_attributes(pair);
+                }
+
+                Rule::properties => {
+                    properties = parse_properties(pair);
+                }
+
+                _ => unreachable!(),
+            }
+
+            (attributes, properties)
+        },
+    );
+
+    let body = Body::new(properties?);
+
+    Ok(Ast::Object(Object::new(Rc::new(attributes?), body)))
+}
+
+fn parse_attributes(pair: Pair<Rule>) -> ParseResult<Attributes<Ast>> {
+    assert!(matches!(pair.as_rule(), Rule::attributes));
+
+    let mut attributes = Attributes::default();
+
+    for pair in pair.into_inner() {
+        let mut pairs = pair.into_inner();
+        let key_pair = pairs.next().unwrap();
+        let value_pair = pairs.next().unwrap();
+        let key = match key_pair.as_rule() {
+            Rule::KEY => Key::Key(key_pair.as_str().into()),
+            Rule::METAKEY => Key::MetaKey(key_pair.as_str().into()),
+            _ => unreachable!(),
+        };
+
+        match value_pair.as_rule() {
+            Rule::attributes => attributes.insert(
+                key,
+                Attribute::Attributes(Rc::new(parse_attributes(value_pair)?)),
+            ),
+
+            _ => attributes.insert(
+                key,
+                Attribute::Value(Rc::new(parse_expression(value_pair)?)),
+            ),
+        }
+    }
+
+    Ok(attributes)
+}
+
+fn parse_properties(pair: Pair<Rule>) -> ParseResult<Vec<Ast>> {
+    assert!(matches!(pair.as_rule(), Rule::properties));
+
+    pair.into_inner()
+        .map(|property| match property.as_rule() {
+            Rule::func_def => parse_func_def(property),
+            Rule::assignment => parse_assignment(property),
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+pub(crate) fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Ast> {
+    assert!(matches!(pair.as_rule(), Rule::assignment));
+
+    let mut pairs = pair.into_inner();
+    let id = pairs.next().unwrap();
+    let expression = pairs.next().unwrap();
+
+    if RESERVED_WORDS.contains(id.as_str()) {
+        return Err(custom_error(
+            &id,
+            &format!("{} is a reserved keyword", id.as_str()),
+        ));
+    }
+
+    Ok(Ast::Assignment(
+        id.as_str().into(),
+        Box::new(parse_expression(expression)?),
+    ))
+}
+
+pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
+    match pair.as_rule() {
+        Rule::property_call => {
+            let calls = pair
+                .into_inner()
+                .map(parse_call)
+                .collect::<ParseResult<Vec<_>>>()?;
+            Ok(Ast::PropertyCall(calls))
+        }
+
+        Rule::list_index => {
+            let mut inner = pair.into_inner();
+            // NOTE: it can be call only, but not wrapped into Rule::call
+            let expression = parse_call(inner.next().unwrap())?;
+            let indices = inner
+                .map(parse_expression)
+                .collect::<ParseResult<Vec<Ast>>>()?;
+
+            Ok(indices.into_iter().fold(expression, |acc, index| {
+                Ast::ListIndex(Box::new(acc), Box::new(index))
+            }))
+        }
+
+        Rule::fn_call => {
+            let mut inner = pair.into_inner();
+            let id: Id = inner.next().unwrap().as_str().into();
+            let args = inner
+                .map(parse_expression)
+                .collect::<ParseResult<Vec<Ast>>>()?;
+            Ok(Ast::FunctionCall(id, args))
+        }
+
+        Rule::var_call => Ok(Ast::Variable(pair.into_inner().as_str().into())),
+
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn parse_expr_body(pair: Pair<Rule>) -> ParseResult<Body> {
+    let expressions: Vec<Ast> = pair
+        .into_inner()
+        .map(parse_expression)
+        .collect::<ParseResult<Vec<Ast>>>()?;
+
+    Ok(Body::new(expressions))
+}
+
+pub(crate) fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Ast> {
+    let mut inner = pair.into_inner();
+    let id_pair = inner.next().unwrap();
+    if RESERVED_WORDS.contains(id_pair.as_str()) {
+        return Err(custom_error(
+            &id_pair,
+            &format!("'{}' is a reserved keyword", id_pair.as_str()),
+        ));
+    }
+
+    let id = id_pair.as_str().into();
+    let args = parse_func_args(inner.next().unwrap())?;
+    let body = parse_expr_body(inner.next().unwrap())?;
+
+    Ok(Ast::FunctionDef(FunctionDef::new(id, args, body)))
+}
+
+fn parse_func_args(pair: Pair<Rule>) -> ParseResult<Vec<Id>> {
+    pair.into_inner().map(|id| Ok(id.as_str().into())).collect()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -187,187 +372,6 @@ impl Body {
     }
 }
 
-pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
-    match pair.as_rule() {
-        Rule::node => todo!(),
-        Rule::object => parse_object(pair),
-        Rule::assignment => parse_assignment(pair),
-        Rule::if_expr => todo!(),
-        Rule::repeat_expr => todo!(),
-        Rule::algebraic_expr => todo!(),
-        Rule::bool_expr => todo!(),
-        Rule::BOOL => Ok(Ast::Value(Value::Boolean(pair.as_str().parse().unwrap()))),
-        Rule::call => parse_call(pair.into_inner().next().unwrap()),
-        Rule::list => Ok(Ast::List(
-            pair.into_inner()
-                .map(|item| parse_expression(item))
-                .collect::<ParseResult<Vector<Ast>>>()?,
-        )),
-        Rule::NUMBER => Ok(Ast::Value(Value::Number(pair.as_str().parse().unwrap()))),
-        Rule::STRING => Ok(Ast::Value(Value::String(
-            pair.into_inner().next().unwrap().as_str().into(),
-        ))),
-        Rule::GD_VALUE => Ok(Ast::Value(Value::GdValue(
-            pair.into_inner().next().unwrap().as_str().into(),
-        ))),
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
-    assert!(matches!(pair.as_rule(), Rule::object));
-
-    let pairs = pair.into_inner();
-
-    let (attributes, properties) = pairs.fold(
-        (Ok(Attributes::default()), Ok(Vec::new())),
-        |(mut attributes, mut properties), pair| {
-            match pair.as_rule() {
-                Rule::attributes => {
-                    attributes = parse_attributes(pair);
-                }
-
-                Rule::properties => {
-                    properties = parse_properties(pair);
-                }
-
-                _ => unreachable!(),
-            }
-
-            (attributes, properties)
-        },
-    );
-
-    let body = Body::new(properties?);
-
-    Ok(Ast::Object(Object::new(Rc::new(attributes?), body)))
-}
-
-fn parse_attributes(pair: Pair<Rule>) -> ParseResult<Attributes<Ast>> {
-    assert!(matches!(pair.as_rule(), Rule::attributes));
-
-    let mut attributes = Attributes::default();
-
-    for pair in pair.into_inner() {
-        let mut pairs = pair.into_inner();
-        let key_pair = pairs.next().unwrap();
-        let value_pair = pairs.next().unwrap();
-        let key = match key_pair.as_rule() {
-            Rule::KEY => Key::Key(key_pair.as_str().into()),
-            Rule::METAKEY => Key::MetaKey(key_pair.as_str().into()),
-            _ => unreachable!(),
-        };
-
-        match value_pair.as_rule() {
-            Rule::attributes => attributes.insert(
-                key,
-                Attribute::Attributes(Rc::new(parse_attributes(value_pair)?)),
-            ),
-
-            _ => attributes.insert(
-                key,
-                Attribute::Value(Rc::new(parse_expression(value_pair)?)),
-            ),
-        }
-    }
-
-    Ok(attributes)
-}
-
-fn parse_properties(pair: Pair<Rule>) -> ParseResult<Vec<Ast>> {
-    assert!(matches!(pair.as_rule(), Rule::properties));
-
-    pair.into_inner()
-        .map(|property| match property.as_rule() {
-            Rule::func_def => parse_func_def(property),
-            Rule::assignment => parse_assignment(property),
-            _ => unreachable!(),
-        })
-        .collect()
-}
-
-pub(crate) fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Ast> {
-    assert!(matches!(pair.as_rule(), Rule::assignment));
-
-    let mut pairs = pair.into_inner();
-    let id = pairs.next().unwrap();
-    let expression = pairs.next().unwrap();
-
-    if RESERVED_WORDS.contains(id.as_str()) {
-        return Err(custom_error(
-            &id,
-            &format!("{} is a reserved keyword", id.as_str()),
-        ));
-    }
-
-    Ok(Ast::Assignment(
-        id.as_str().into(),
-        Box::new(parse_expression(expression)?),
-    ))
-}
-
-pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
-    match pair.as_rule() {
-        Rule::property_call => todo!(),
-
-        Rule::list_index => {
-            let mut inner = pair.into_inner();
-            // NOTE: it can be call only, but not wrapped into Rule::call
-            let expression = parse_call(inner.next().unwrap())?;
-            let indices = inner
-                .map(parse_expression)
-                .collect::<ParseResult<Vec<Ast>>>()?;
-
-            Ok(indices.into_iter().fold(expression, |acc, index| {
-                Ast::ListIndex(Box::new(acc), Box::new(index))
-            }))
-        }
-
-        Rule::fn_call => {
-            let mut inner = pair.into_inner();
-            let id: Id = inner.next().unwrap().as_str().into();
-            let args = inner
-                .map(parse_expression)
-                .collect::<ParseResult<Vec<Ast>>>()?;
-            Ok(Ast::FunctionCall(id, args))
-        }
-
-        Rule::var_call => Ok(Ast::Variable(pair.into_inner().as_str().into())),
-
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn parse_expr_body(pair: Pair<Rule>) -> ParseResult<Body> {
-    let expressions: Vec<Ast> = pair
-        .into_inner()
-        .map(parse_expression)
-        .collect::<ParseResult<Vec<Ast>>>()?;
-
-    Ok(Body::new(expressions))
-}
-
-pub(crate) fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Ast> {
-    let mut inner = pair.into_inner();
-    let id_pair = inner.next().unwrap();
-    if RESERVED_WORDS.contains(id_pair.as_str()) {
-        return Err(custom_error(
-            &id_pair,
-            &format!("'{}' is a reserved keyword", id_pair.as_str()),
-        ));
-    }
-
-    let id = id_pair.as_str().into();
-    let args = parse_func_args(inner.next().unwrap())?;
-    let body = parse_expr_body(inner.next().unwrap())?;
-
-    Ok(Ast::FunctionDef(FunctionDef::new(id, args, body)))
-}
-
-fn parse_func_args(pair: Pair<Rule>) -> ParseResult<Vec<Id>> {
-    pair.into_inner().map(|id| Ok(id.as_str().into())).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use im::vector;
@@ -398,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_object() {
+    fn test_object() {
         let pair = SparkMLParser::parse(
             Rule::expression,
             r#"{ 
@@ -414,9 +418,9 @@ mod tests {
         .unwrap()
         .next()
         .unwrap();
-        let expr = parse_object(pair).unwrap();
+        let expr = parse_object(pair.clone()).unwrap();
 
-        if let Ast::Object(object) = expr {
+        if let Ast::Object(object) = expr.clone() {
             assert_eq!(object.attributes().table().len(), 3);
 
             match object.attributes().get(&Key::Key("foo".into())) {
@@ -447,6 +451,23 @@ mod tests {
                 }
                 _ => panic!("Expected assignment"),
             }
+        } else {
+            panic!("Expected object");
+        }
+
+        // test evaluation
+        let context = Context::default();
+        let object = expr.eval(&pair, context.clone()).unwrap();
+
+        // object should have its own context (i.e. it shouldn't touch the parent context)
+        assert_eq!(context.var_non_recursive(&"n".into()), None);
+
+        if let Value::Object(ref object) = object {
+            assert_eq!(object.attributes().table().len(), 3);
+            assert_eq!(
+                object.attributes().get(&Key::Key("foo".into())),
+                Some(&Attribute::Value(Value::Number(1.0).into()))
+            );
         } else {
             panic!("Expected object");
         }
@@ -536,6 +557,23 @@ mod tests {
                 .eval(&pair, context.clone())
                 .unwrap(),
             Value::Number(1.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::call, "foo.bar[0].baz()")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            parse_expression(pair.clone()).unwrap(),
+            Ast::PropertyCall(vec![
+                Ast::Variable("foo".into()),
+                Ast::ListIndex(
+                    Box::new(Ast::Variable("bar".into())),
+                    Box::new(Ast::Value(Value::Number(0.0)))
+                ),
+                Ast::FunctionCall("baz".into(), vec![])
+            ])
         );
     }
 
