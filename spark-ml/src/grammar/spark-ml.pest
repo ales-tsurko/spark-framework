@@ -22,7 +22,8 @@ sub_resource = { "sub" ~ node }
 
 assignment   = !{ ID ~ "=" ~ NEWLINE* ~ expression }
 
-func_def      = !{ "fn" ~ ID ~ func_args ~ body}
+func_def      = !{ (PUSH(INDENT) ~ func_def_in ~ DROP) | func_def_in }
+    func_def_in = _{"fn" ~ ID ~ func_args ~ body}
     func_args = { "(" ~ (ID ~ ("," ~ ID)*)? ~ ")" }
 
 // it's easier to parse this way
@@ -56,10 +57,13 @@ if_expr    = !{ "if" ~ (bool_expr | BOOL | call) ~ body ~ elseif* ~ ifelse? }
     
 repeat_expr = !{ "repeat" ~ (INT | call) ~ body }
 
-body               = ${ blank ~ PEEK_ALL ~ PUSH(INDENT)
-                        ~ (body_statement ~ blank ~ (PEEK_ALL ~ body_statement ~ INDENT? ~ blank)*)? 
-                        ~ PEEK_ALL? ~ expression ~ INDENT? ~ DROP
-                      }
+body               = ${ blank ~ 
+                            PEEK_ALL ~ PUSH(INDENT) ~ 
+                                (
+                                    ((body_statement ~ blank ~ PEEK_ALL)+ ~ expression) 
+                                    | expression
+                                ) ~ INDENT? ~ DROP 
+                       }
     body_statement = _{ assignment }
 
 algebraic_expr      = !{ (MATH_PRE_OP ~ (alg_value | nested_alg_expr)) 
@@ -89,7 +93,7 @@ node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
     attribute         = !{ (METAKEY | KEY) ~ ":" ~ (attributes | expression) ~ INDENT? }
 
 object           = !{ "{" ~ attributes? ~ properties? ~ blank? ~ "}" }
-    properties   = ${ property? ~ blank ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK ~ property)* ~ DROP }
+    properties   = ${ property? ~ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ property ~ (blank ~ PEEK_ALL ~ property)* ~ DROP }
         property = _{ (func_def | assignment) ~ INDENT? }
 
 list = !{ "[" ~ NEWLINE* ~ (expression  ~ (NEWLINE* ~ "," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ NEWLINE* ~ "]" }

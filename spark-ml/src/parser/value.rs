@@ -4,9 +4,6 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use im::Vector;
-use pest::ParseResult;
-
 use crate::parser::ast::Body;
 use crate::parser::context::Context;
 
@@ -17,7 +14,7 @@ pub(crate) enum Value {
     Object(Object<Value>),
     String(String),
     Boolean(bool),
-    List(Vector<Value>),
+    List(Vec<Value>),
     Number(f64),
     GdValue(String),
 }
@@ -65,7 +62,7 @@ impl<T> Object<T> {
     pub(crate) fn body(&self) -> &Body {
         &self.body
     }
-    
+
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }

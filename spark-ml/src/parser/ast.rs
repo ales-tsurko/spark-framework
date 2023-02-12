@@ -2,7 +2,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use im::Vector;
 use pest::iterators::Pair;
 
 use crate::parser::context::Context;
@@ -23,7 +22,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
         Rule::list => Ok(Ast::List(
             pair.into_inner()
                 .map(|item| parse_expression(item))
-                .collect::<ParseResult<Vector<Ast>>>()?,
+                .collect::<ParseResult<Vec<Ast>>>()?,
         )),
         Rule::NUMBER => Ok(Ast::Value(Value::Number(pair.as_str().parse().unwrap()))),
         Rule::STRING => Ok(Ast::Value(Value::String(
@@ -154,7 +153,7 @@ pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
                 .collect::<ParseResult<Vec<Ast>>>()?;
 
             Ok(indices.into_iter().fold(expression, |acc, index| {
-                Ast::ListIndex(Box::new(acc), Box::new(index))
+                Ast::ListIndex(ListIndex::new(acc, index))
             }))
         }
 
@@ -216,8 +215,8 @@ pub(crate) enum Ast {
     Repeat,
     Algebraic,
     Boolean,
-    List(Vector<Ast>),
-    ListIndex(Box<Ast>, Box<Ast>),
+    List(Vec<Ast>),
+    ListIndex(ListIndex),
     PropertyCall(Box<Ast>, Box<Ast>),
 }
 
@@ -233,7 +232,9 @@ impl Ast {
             }
 
             Ast::FunctionDef(func) => {
-                context.add_func(pair, func.clone())?;
+                let mut func = func.clone();
+                func.capture_parent_context(&context);
+                context.add_func(pair, func)?;
                 Ok(Value::Boolean(true))
             }
 
@@ -241,7 +242,7 @@ impl Ast {
 
             Ast::PropertyCall(target, property) => {
                 if let Value::Object(obj) = target.eval(pair, context.clone())? {
-                    obj.call_poperty(pair, property)
+                    obj.call_poperty(pair, property, context)
                 } else {
                     Err(custom_error(
                         pair,
@@ -252,7 +253,7 @@ impl Ast {
 
             Ast::FunctionCall(id, args) => {
                 if let Some(func) = context.func(&id) {
-                    func.eval(pair, args, context.clone())
+                    func.call(pair, args, context.clone())
                 } else {
                     Err(custom_error(
                         pair,
@@ -264,26 +265,16 @@ impl Ast {
             Ast::List(list) => Ok(Value::List(
                 list.iter()
                     .map(|expr| expr.eval(pair, context.clone()))
-                    .collect::<ParseResult<Vector<Value>>>()?,
+                    .collect::<ParseResult<Vec<Value>>>()?,
             )),
 
             Ast::Variable(id) => context
                 .var(id)
                 .ok_or_else(|| custom_error(pair, &format!("'{}' not found", id.as_str()))),
 
-            Ast::ListIndex(expression, index) => {
-                if let Value::List(value) = expression.eval(pair, context.clone())? {
-                    if let Value::Number(index) = index.eval(pair, context)? {
-                        let index = index as usize;
-                        value.get(index).cloned().ok_or_else(|| {
-                            custom_error(pair, &format!("Index '{}' is out of bounds", index))
-                        })
-                    } else {
-                        Err(custom_error(pair, "Index should be a number"))
-                    }
-                } else {
-                    Err(custom_error(pair, "Only lists can be indexed"))
-                }
+            Ast::ListIndex(list_index) => {
+                let list = list_index.eval_target(pair, context.clone())?;
+                list_index.eval_index(list, pair, context)
             }
             _ => todo!(),
         }
@@ -292,7 +283,11 @@ impl Ast {
 
 impl Object<Ast> {
     pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Object<Value>> {
-        let context = Context::with_parent(context);
+        let context = Context::from_parent(
+            Context::default()
+                .with_vars(context.vars().capture())
+                .with_funcs(context.funcs().clone()),
+        );
         let _ = self.body().eval(pair, context.clone())?;
         let attributes = Rc::new(self.attributes().eval(pair, context.clone())?);
         Ok(Object::new(attributes, self.body().clone(), context))
@@ -300,22 +295,42 @@ impl Object<Ast> {
 }
 
 impl Object<Value> {
-    pub(crate) fn call_poperty(&self, pair: &Pair<Rule>, property: &Ast) -> ParseResult<Value> {
+    pub(crate) fn call_poperty(
+        &self,
+        pair: &Pair<Rule>,
+        property: &Ast,
+        caller_ctx: Context,
+    ) -> ParseResult<Value> {
         match property {
             Ast::FunctionCall(id, args) => {
                 if let Some(func) = self.context().shallow_clone().func(&id) {
-                    func.eval(pair, args, self.context().clone())
+                    func.call(pair, args, self.context().clone())
                 } else {
                     Err(custom_error(
                         pair,
                         &format!("Object has no '{}' function", id.as_str()),
                     ))
                 }
-            } 
-            Ast::PropertyCall(_, _) | Ast::ListIndex(_, _) => {
-                property.eval(pair, self.context().clone())
             }
-            _ => property.eval(pair, self.context().shallow_clone()),
+
+            Ast::ListIndex(list_index) => {
+                let list = list_index.eval_target(pair, self.context().clone())?;
+                list_index.eval_index(list, pair, caller_ctx)
+            }
+
+            Ast::PropertyCall(target, prop) => {
+                match target.eval(pair, self.context().shallow_clone())? {
+                    Value::Object(obj) => obj.call_poperty(pair, prop, caller_ctx),
+                    _ => Err(custom_error(
+                        pair,
+                        "Property call can be applied only to objects",
+                    )),
+                }
+            }
+
+            Ast::Variable(_) => property.eval(pair, self.context().shallow_clone()),
+
+            _ => unreachable!(),
         }
     }
 }
@@ -352,19 +367,39 @@ impl Attribute<Ast> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct FunctionDef {
     pub(crate) name: Id,
-    args: Vec<Id>,
+    args: Rc<Vec<Id>>,
     body: Body,
+    context: Option<Context>,
+}
+
+impl PartialEq for FunctionDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.args == other.args && self.body == other.body
+    }
 }
 
 impl FunctionDef {
     pub(crate) fn new(name: Id, args: Vec<Id>, body: Body) -> Self {
-        Self { name, args, body }
+        Self {
+            name,
+            args: Rc::new(args),
+            body,
+            context: None,
+        }
     }
 
-    pub(crate) fn eval(
+    pub(crate) fn capture_parent_context(&mut self, context: &Context) {
+        self.context = Some(Context::from_parent(
+            Context::default()
+                .with_vars(context.vars().capture())
+                .with_funcs(context.funcs().clone()),
+        ));
+    }
+
+    pub(crate) fn call(
         &self,
         pair: &Pair<Rule>,
         args: &[Ast],
@@ -377,10 +412,20 @@ impl FunctionDef {
             ));
         }
 
-        let context = Context::with_parent(context.clone());
+        let caller_ctx = context.clone();
+
+        let context = self.context.clone().ok_or(custom_error(
+            pair,
+            &format!(
+                "Internal: context of function '{}' not found",
+                self.name.as_str()
+            ),
+        ))?;
 
         for (n, arg) in args.iter().enumerate() {
-            let value = arg.eval(pair, context.clone())?;
+            // args should be evaluated in the caller's context
+            let value = arg.eval(pair, caller_ctx.clone())?;
+            // and added to the function's context
             context.add_var(pair, self.args[n].clone(), value)?;
         }
 
@@ -390,13 +435,13 @@ impl FunctionDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Body {
-    expressions: Box<Vec<Ast>>,
+    expressions: Rc<Vec<Ast>>,
 }
 
 impl Body {
     pub(crate) fn new(expressions: Vec<Ast>) -> Self {
         Self {
-            expressions: Box::new(expressions),
+            expressions: Rc::new(expressions),
         }
     }
 
@@ -411,9 +456,56 @@ impl Body {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListIndex {
+    pub(crate) target: Box<Ast>,
+    pub(crate) index: Box<Ast>,
+}
+
+impl ListIndex {
+    pub(crate) fn new(target: Ast, index: Ast) -> Self {
+        Self {
+            target: target.into(),
+            index: index.into(),
+        }
+    }
+
+    pub(crate) fn eval_target(
+        &self,
+        pair: &Pair<Rule>,
+        context: Context,
+    ) -> ParseResult<Vec<Value>> {
+        match self.target.eval(pair, context.clone())? {
+            Value::List(list) => Ok(list),
+            _ => Err(custom_error(pair, "Only lists can be indexed")),
+        }
+    }
+
+    pub(crate) fn eval_index(
+        &self,
+        mut value: Vec<Value>,
+        pair: &Pair<Rule>,
+        context: Context,
+    ) -> ParseResult<Value> {
+        if let Value::Number(index) = self.index.eval(pair, context)? {
+            let index = index as usize;
+
+            if index >= value.len() {
+                return Err(custom_error(
+                    pair,
+                    &format!("Index '{}' is out of bounds", index),
+                ));
+            }
+
+            Ok(value.swap_remove(index))
+        } else {
+            Err(custom_error(pair, "Index should be a number"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use im::vector;
     use pest::Parser;
 
     use crate::parser::SparkMLParser;
@@ -425,15 +517,15 @@ mod tests {
         let pair = SparkMLParser::parse(
             Rule::func_def,
             r#"fn foo(a, b)
-                n = 10
-                20"#,
+                    n = 10
+                    20"#,
         )
         .unwrap()
         .next()
         .unwrap();
         if let Ast::FunctionDef(function) = parse_func_def(pair).unwrap() {
             assert_eq!(function.name, "foo".into());
-            assert_eq!(function.args, vec!["a".into(), "b".into()]);
+            assert_eq!(function.args.as_ref(), &["a".into(), "b".into()]);
             assert_eq!(function.body.expressions.len(), 2);
         } else {
             panic!("Expected function definition");
@@ -486,7 +578,7 @@ mod tests {
                     assert_eq!(id, &"n".into());
                     assert!(matches!(expr.as_ref(), &Ast::Value(Value::Number(_))));
                     assert_eq!(func.name, "test".into());
-                    assert_eq!(func.args, vec![]);
+                    assert!(func.args.is_empty());
                 }
                 _ => panic!("Expected assignment"),
             }
@@ -603,10 +695,10 @@ mod tests {
             Ast::PropertyCall(
                 Box::new(Ast::Variable("foo".into())),
                 Box::new(Ast::PropertyCall(
-                    Box::new(Ast::ListIndex(
-                        Box::new(Ast::Variable("bar".into())),
-                        Box::new(Ast::Value(Value::Number(0.0)))
-                    )),
+                    Box::new(Ast::ListIndex(ListIndex::new(
+                        Ast::Variable("bar".into()),
+                        Ast::Value(Value::Number(0.0))
+                    ))),
                     Box::new(Ast::FunctionCall("baz".into(), vec![]))
                 ))
             )
@@ -619,13 +711,24 @@ mod tests {
         let pair = SparkMLParser::parse(
             Rule::assignment,
             r#"test = {
-                n = {
-                    n = 1
-                    foo = 2
-                }
-                foo = 3
-                bar = 4 # shouldn't be accessible from child object (n)
-            }"#,
+                   n = {
+                       n = 1
+                       foo = 2
+                       list = [[1,2],[n,4]]
+
+                       fn bar()
+                           foo()
+                   }
+                   foo = 3
+                   bar = 4 # shouldn't be accessible from child object (n)
+
+                   fn foo()
+                       5
+
+                   fn baz(n)
+                       .n.n = n
+                        n
+               }"#,
         )
         .unwrap()
         .next()
@@ -648,26 +751,107 @@ mod tests {
             .eval(&pair, context.clone())
             .is_err());
 
+        let pair = SparkMLParser::parse(Rule::call, "test.n.foo()")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert!(parse_expression(pair.clone())
+            .unwrap()
+            .eval(&pair, context.clone())
+            .is_err());
+
         // the property call should read its own context
         let pair = SparkMLParser::parse(Rule::call, "test.n.foo")
             .unwrap()
             .next()
             .unwrap();
 
-        parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .unwrap();
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(2.0)
+        );
 
         let pair = SparkMLParser::parse(Rule::call, "test.foo")
             .unwrap()
             .next()
             .unwrap();
 
-        parse_expression(pair.clone())
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(3.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::call, "test.foo()")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(5.0)
+        );
+
+        // functions can read parent context
+        let pair = SparkMLParser::parse(Rule::call, "test.n.bar()")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(5.0)
+        );
+
+        // indexing should be evaluated in the context of the caller (`n` should be undefined here)
+        let pair = SparkMLParser::parse(Rule::call, "test.n.list[n]")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert!(parse_expression(pair.clone())
             .unwrap()
             .eval(&pair, context.clone())
+            .is_err());
+
+        // functions can read and modify properties
+        let pair = SparkMLParser::parse(Rule::call, "test.baz(6)")
+            .unwrap()
+            .next()
             .unwrap();
+
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(6.0)
+        );
+
+        let pair = SparkMLParser::parse(Rule::call, "test.n.n")
+            .unwrap()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            parse_expression(pair.clone())
+                .unwrap()
+                .eval(&pair, context.clone())
+                .unwrap(),
+            Value::Number(6.0)
+        );
     }
 
     #[test]
@@ -682,7 +866,7 @@ mod tests {
                 .unwrap()
                 .eval(&pair, context)
                 .unwrap(),
-            Value::List(vector![
+            Value::List(vec![
                 Value::Boolean(true),
                 Value::Boolean(false),
                 Value::Boolean(false)

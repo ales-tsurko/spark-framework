@@ -17,7 +17,7 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    pub(crate) fn with_parent(parent: Self) -> Self {
+    pub(crate) fn from_parent(parent: Self) -> Self {
         let variables = Table::with_parent(parent.variables);
         let functions = Table::with_parent(parent.functions);
         Self {
@@ -26,12 +26,30 @@ impl Context {
         }
     }
 
+    pub(crate) fn with_vars(mut self, vars: Table<Value>) -> Self {
+        self.variables = vars;
+        self
+    }
+
+    pub(crate) fn with_funcs(mut self, funcs: Table<FunctionDef>) -> Self {
+        self.functions = funcs;
+        self
+    }
+
     /// Clone context without parent tables.
     pub(crate) fn shallow_clone(&self) -> Self {
         Self {
             variables: self.variables.shallow_clone(),
             functions: self.functions.shallow_clone(),
         }
+    }
+
+    pub(crate) fn vars(&self) -> &Table<Value> {
+        &self.variables
+    }
+
+    pub(crate) fn funcs(&self) -> &Table<FunctionDef> {
+        &self.functions
     }
 
     pub(crate) fn var(&self, id: &Id) -> Option<Value> {
@@ -119,6 +137,25 @@ impl<T: Clone> Table<T> {
             })
             .clone()
     }
+
+    /// Create a copy of the table. The difference with `clone` is that `capture` clones the
+    /// variables from the table, while `clone` clones the reference to the table.
+    ///
+    /// Also, it captures the parent tables recursively.
+    pub(crate) fn capture(&self) -> Self {
+        let table = Rc::new(RefCell::new(self.table.borrow().clone()));
+        if let Some(parent) = &self.parent {
+            let parent = parent.capture();
+            return Self {
+                table,
+                parent: Some(Box::new(parent)),
+            };
+        }
+        Self {
+            table,
+            parent: None,
+        }
+    }
 }
 
 impl<T> Default for Table<T> {
@@ -174,10 +211,10 @@ mod tests {
             .is_err());
 
         // recursive lookup
-        let child = Context::with_parent(context.clone());
+        let child = Context::from_parent(context.clone());
 
         assert_eq!(child.var(&"foo".into()), Some(Value::Boolean(false)));
-        
+
         // make it non-recursive
         let child = child.shallow_clone();
         assert!(child.var(&"foo".into()).is_none());
