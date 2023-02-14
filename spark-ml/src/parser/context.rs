@@ -1,23 +1,22 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 
 use pest::iterators::Pair;
 
-use crate::parser::ast::FunctionDef;
-use crate::parser::value::{Id, Value};
+use crate::parser::value::{Function, Id, Value};
 use crate::parser::{custom_error, ParseResult, Rule};
 
 /// Context is a scoped storage for variables and functions.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Context {
     variables: Table<Value>,
-    functions: Table<FunctionDef>,
+    functions: Table<Function>,
 }
 
 impl Context {
-    pub(crate) fn from_parent(parent: Self) -> Self {
+    pub(crate) fn with_parent(parent: Self) -> Self {
         let variables = Table::with_parent(parent.variables);
         let functions = Table::with_parent(parent.functions);
         Self {
@@ -26,38 +25,29 @@ impl Context {
         }
     }
 
-    pub(crate) fn with_vars(mut self, vars: Table<Value>) -> Self {
-        self.variables = vars;
-        self
-    }
-
-    pub(crate) fn with_funcs(mut self, funcs: Table<FunctionDef>) -> Self {
-        self.functions = funcs;
-        self
-    }
-
-    /// Clone context without parent tables.
-    pub(crate) fn shallow_clone(&self) -> Self {
-        Self {
-            variables: self.variables.shallow_clone(),
-            functions: self.functions.shallow_clone(),
-        }
-    }
-
-    pub(crate) fn vars(&self) -> &Table<Value> {
-        &self.variables
-    }
-
-    pub(crate) fn funcs(&self) -> &Table<FunctionDef> {
-        &self.functions
+    pub(crate) fn parent(&self) -> Option<Self> {
+        let variables = self.variables.parent()?;
+        let functions = self.functions.parent()?;
+        Some(Self {
+            variables,
+            functions,
+        })
     }
 
     pub(crate) fn var(&self, id: &Id) -> Option<Value> {
         self.variables.get(id)
     }
 
-    pub(crate) fn func(&self, id: &Id) -> Option<FunctionDef> {
+    pub(crate) fn func(&self, id: &Id) -> Option<Function> {
         self.functions.get(id)
+    }
+
+    pub(crate) fn vars(&self) -> &Table<Value> {
+        &self.variables
+    }
+
+    pub(crate) fn funcs(&self) -> &Table<Function> {
+        &self.functions
     }
 
     /// Add a variable to the context.
@@ -86,7 +76,7 @@ impl Context {
     }
 
     /// Add a function definition.
-    pub(crate) fn add_func(&self, pair: &Pair<Rule>, func_def: FunctionDef) -> ParseResult<()> {
+    pub(crate) fn add_func(&self, pair: &Pair<Rule>, func_def: Function) -> ParseResult<()> {
         let mut table = self.functions.table.borrow_mut();
         match table.get_mut(&func_def.name) {
             None => {
@@ -103,6 +93,7 @@ impl Context {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Table<T> {
+    recursive: Cell<bool>,
     table: Rc<RefCell<HashMap<Id, T>>>,
     parent: Option<Box<Self>>,
 }
@@ -110,57 +101,49 @@ pub(crate) struct Table<T> {
 impl<T> Table<T> {
     pub(crate) fn with_parent(parent: Self) -> Self {
         Self {
+            recursive: parent.recursive.clone(),
             table: Default::default(),
             parent: Some(Box::new(parent)),
         }
     }
 
-    pub(crate) fn shallow_clone(&self) -> Self {
-        Self {
-            table: self.table.clone(),
-            parent: None,
+    pub(crate) fn set_recursive(&self, value: bool) {
+        self.recursive.set(value);
+    }
+    
+    pub(crate) fn set_all_recursive(&self, value: bool) {
+        self.recursive.set(value);
+        if let Some(parent) = self.parent.as_ref() {
+            parent.set_all_recursive(value);
         }
     }
 }
 
 impl<T: Clone> Table<T> {
-    /// Get a value looking parent tables if necessary.
+    /// Get a value.
     pub(crate) fn get(&self, id: &Id) -> Option<T> {
-        self.table
-            .borrow()
-            .get(id)
-            .cloned()
-            .or_else(|| {
+        let value = self.table.borrow().get(id).cloned();
+
+        if self.recursive.get() {
+            value.or_else(|| {
                 self.parent
                     .as_ref()
                     .and_then(|parent: &Box<Self>| parent.get(id))
             })
-            .clone()
+        } else {
+            value
+        }
     }
 
-    /// Create a copy of the table. The difference with `clone` is that `capture` clones the
-    /// variables from the table, while `clone` clones the reference to the table.
-    ///
-    /// Also, it captures the parent tables recursively.
-    pub(crate) fn capture(&self) -> Self {
-        let table = Rc::new(RefCell::new(self.table.borrow().clone()));
-        if let Some(parent) = &self.parent {
-            let parent = parent.capture();
-            return Self {
-                table,
-                parent: Some(Box::new(parent)),
-            };
-        }
-        Self {
-            table,
-            parent: None,
-        }
+    pub(crate) fn parent(&self) -> Option<Self> {
+        self.parent.as_ref().map(|p| *p.clone())
     }
 }
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
         Self {
+            recursive: Cell::new(true),
             table: Default::default(),
             parent: None,
         }
@@ -211,12 +194,12 @@ mod tests {
             .is_err());
 
         // recursive lookup
-        let child = Context::from_parent(context.clone());
+        let child = Context::with_parent(context.clone());
 
         assert_eq!(child.var(&"foo".into()), Some(Value::Boolean(false)));
 
         // make it non-recursive
-        let child = child.shallow_clone();
+        child.vars().set_recursive(false);
         assert!(child.var(&"foo".into()).is_none());
     }
 }
