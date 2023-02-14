@@ -3,8 +3,6 @@ module = { SOI ~ (statement | NEWLINE)* ~ EOI }
 statement        = _{ (
                         assignment 
                         | node 
-                        | signal_def
-                        | animation_def
                         | func_def
                         | export
                         | if_expr 
@@ -20,7 +18,9 @@ ext_resource = { "ext" ~ ( STRING | ID ) }
 
 sub_resource = { "sub" ~ node }
 
-assignment   = !{ (property_call | ancestor_ref | list_index | ID) ~ "=" ~ NEWLINE* ~ expression }
+assignment            = !{ (assign_property | ancestor_ref | assign_list_index | ID) ~ "=" ~ NEWLINE* ~ expression }
+    assign_list_index = { ID ~ ("[" ~ (NUMBER | call) ~ "]")+ }
+    assign_property   = { (ancestor_ref | assign_list_index | ID) ~ "." ~ (assign_property | assign_list_index | ID) }
 
 func_def      = !{ (PUSH(INDENT) ~ func_def_in ~ DROP) | func_def_in }
     func_def_in = _{"fn" ~ ID ~ func_args ~ body}
@@ -30,12 +30,6 @@ func_def      = !{ (PUSH(INDENT) ~ func_def_in ~ DROP) | func_def_in }
 export          = _{ export_func | export_var }
     export_func = {"export" ~ func_def}
     export_var  = {"export" ~ assignment}
-
-signal_def    = !{ attr_id ~ "=>" ~ attr_id }
-    attr_id   = { ID ~ ("." ~ ID )+ }
-
-animation_def        = !{ attr_id ~ "~" ~ animation_params }
-    animation_params = { node_id ~ attributes }
 
 expression = _{ node 
                 | object 

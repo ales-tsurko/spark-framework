@@ -114,21 +114,60 @@ fn parse_properties(pair: Pair<Rule>) -> ParseResult<Vec<Ast>> {
 pub(crate) fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Ast> {
     assert!(matches!(pair.as_rule(), Rule::assignment));
 
-    let mut pairs = pair.into_inner();
-    let id = pairs.next().unwrap();
+    let mut pairs = pair.clone().into_inner();
+    let target = pairs.next().unwrap();
     let expression = pairs.next().unwrap();
+    let expression = parse_expression(expression)?;
+    let target = parse_assignment_target(target)?;
 
-    if RESERVED_WORDS.contains(id.as_str()) {
-        return Err(custom_error(
-            &id,
-            &format!("{} is a reserved keyword", id.as_str()),
-        ));
+    Ok(Ast::Assignment(Assignment::new(target, expression)))
+}
+
+fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
+    match pair.as_rule() {
+        Rule::ID => {
+            // in contrast to other assignment targets, IDs can be undefined (we reference others
+            // instead)
+            let id: Id = pair.as_str().into();
+            if RESERVED_WORDS.contains(id.as_str()) {
+                return Err(custom_error(
+                    &pair,
+                    &format!("'{}' is a reserved keyword", id.as_str()),
+                ));
+            }
+            Ok(AssignmentTarget::Id(id))
+        }
+
+        Rule::assign_property => {
+            let mut inner = pair.into_inner();
+            let target = inner.next().unwrap();
+            let property = inner.next().unwrap();
+            let target = parse_assignment_target(target)?;
+            let property = parse_assignment_target(property)?;
+            Ok(AssignmentTarget::Property(AssignProperty::new(
+                target, property,
+            )))
+        }
+
+        Rule::assign_list_index => {
+            let inner = pair.clone().into_inner();
+            let id: Id = pair.as_str().into();
+            let indices = inner
+                .map(parse_expression)
+                .collect::<ParseResult<Vec<Ast>>>()?;
+            Ok(AssignmentTarget::ListIndex(AssignListIndex::new(
+                id, indices,
+            )))
+        }
+
+        Rule::ancestor_ref => {
+            let ancestor_ref =
+                AncestorRef(Box::new(parse_call(pair.into_inner().next().unwrap())?));
+            Ok(AssignmentTarget::Ancestor(ancestor_ref))
+        }
+
+        _ => unreachable!(),
     }
-
-    Ok(Ast::Assignment(
-        id.as_str().into(),
-        Box::new(parse_expression(expression)?),
-    ))
 }
 
 pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
@@ -168,9 +207,9 @@ pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
 
         Rule::var_call => Ok(Ast::Variable(pair.into_inner().as_str().into())),
 
-        Rule::ancestor_ref => Ok(Ast::AncestorRef(Box::new(parse_call(
+        Rule::ancestor_ref => Ok(Ast::AncestorRef(AncestorRef(Box::new(parse_call(
             pair.into_inner().next().unwrap(),
-        )?))),
+        )?)))),
 
         _ => unreachable!(),
     }
@@ -209,13 +248,13 @@ fn parse_func_args(pair: Pair<Rule>) -> ParseResult<Vec<Id>> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub(crate) enum Ast {
-    Assignment(Id, Box<Self>),
+    Assignment(Assignment),
     Object(Object<Self>),
     Value(Value),
     FunctionCall(Id, Vec<Self>),
     FunctionDef(Function),
     Variable(Id),
-    AncestorRef(Box<Self>),
+    AncestorRef(AncestorRef),
     If,
     Repeat,
     Algebraic,
@@ -230,11 +269,7 @@ impl Ast {
         match self {
             Ast::Value(val) => Ok(val.clone()),
 
-            Ast::Assignment(id, expression) => {
-                let value = expression.eval(pair, context.clone())?;
-                context.add_var(pair, id.clone(), value.clone())?;
-                Ok(value)
-            }
+            Ast::Assignment(assignment) => assignment.eval(pair, context),
 
             Ast::FunctionDef(func) => {
                 let func = func.eval(context.clone());
@@ -276,7 +311,7 @@ impl Ast {
                 .var(id)
                 .ok_or_else(|| custom_error(pair, &format!("'{}' not found", id.as_str()))),
 
-            Ast::AncestorRef(call) => call.eval_ancestor_ref(pair, context),
+            Ast::AncestorRef(call) => call.eval(pair, context),
 
             Ast::ListIndex(list_index) => {
                 let list = list_index.eval_target(pair, context.clone())?;
@@ -285,8 +320,150 @@ impl Ast {
             _ => todo!(),
         }
     }
+}
 
-    fn eval_ancestor_ref(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Assignment {
+    target: AssignmentTarget,
+    expression: Box<Ast>,
+}
+
+impl Assignment {
+    pub(crate) fn new(target: AssignmentTarget, expression: Ast) -> Self {
+        Self {
+            target,
+            expression: Box::new(expression),
+        }
+    }
+
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
+        let value = self.expression.eval(pair, caller_ctx.clone())?;
+
+        match &self.target {
+            AssignmentTarget::Id(id) => {
+                caller_ctx.add_var(pair, id.clone(), value.clone())?;
+                Ok(value)
+            }
+
+            AssignmentTarget::Ancestor(ancestor) => todo!(),
+
+            AssignmentTarget::Property(prop_assignment) => todo!(),
+
+            AssignmentTarget::ListIndex(list_index) => list_index.eval(pair, value, caller_ctx),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AssignmentTarget {
+    Id(Id),
+    Ancestor(AncestorRef),
+    Property(AssignProperty),
+    ListIndex(AssignListIndex),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssignProperty {
+    target: Box<AssignmentTarget>,
+    property: Box<AssignmentTarget>,
+}
+
+impl AssignProperty {
+    pub(crate) fn new(target: AssignmentTarget, property: AssignmentTarget) -> Self {
+        Self {
+            target: Box::new(target),
+            property: Box::new(property),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssignListIndex {
+    target: Id,
+    indices: Vec<Ast>,
+}
+
+impl AssignListIndex {
+    pub(crate) fn new(target: Id, indices: Vec<Ast>) -> Self {
+        Self { target, indices }
+    }
+
+    pub(crate) fn eval(
+        &self,
+        pair: &Pair<Rule>,
+        value: Value,
+        context: Context,
+    ) -> ParseResult<Value> {
+        let list = context.var(&self.target).ok_or_else(|| {
+            custom_error(pair, &format!("Value '{}' not found", self.target.as_str()))
+        })?;
+
+        let mut list = match list {
+            Value::List(list) => list.clone(),
+            _ => {
+                return Err(custom_error(
+                    pair,
+                    &format!("'{}' is not a list", self.target.as_str()),
+                ))
+            }
+        };
+
+        let indices = self.eval_indices(pair, context.clone())?;
+        let (last, rest) = indices.split_last().unwrap();
+        let mut target_ref = &mut list;
+
+        for index in rest {
+            if index >= &target_ref.len() {
+                return Err(custom_error(
+                    pair,
+                    &format!("Index '{}' out of range", index),
+                ));
+            }
+
+            match target_ref.get_mut(*index) {
+                Some(Value::List(val)) => {
+                    target_ref = val;
+                }
+                Some(_) => {
+                    return Err(custom_error(
+                        pair,
+                        &format!("'{}' is not a list", self.target.as_str()),
+                    ))
+                }
+                _ => {
+                    return Err(custom_error(
+                        pair,
+                        &format!("Index '{}' is out of range", index),
+                    ))
+                }
+            }
+        }
+
+        target_ref[*last] = value.clone();
+
+        let result = Value::List(list);
+
+        context.add_var(pair, self.target.clone(), result)?;
+
+        Ok(value)
+    }
+
+    fn eval_indices(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Vec<usize>> {
+        self.indices
+            .iter()
+            .map(|index| match index.eval(pair, context.clone())? {
+                Value::Number(index) => Ok(index as usize),
+                _ => Err(custom_error(pair, "Index is not a number")),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AncestorRef(Box<Ast>);
+
+impl AncestorRef {
+    fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
         let parent_ctx = caller_ctx
             .clone()
             .parent()
@@ -295,7 +472,7 @@ impl Ast {
 
         parent_ctx.vars().set_all_recursive(true);
 
-        match self {
+        match &*self.0 {
             Ast::Variable(_) => self.eval(pair, parent_ctx),
 
             Ast::ListIndex(list_index) => {
@@ -491,7 +668,7 @@ impl ListIndex {
             if index >= value.len() {
                 return Err(custom_error(
                     pair,
-                    &format!("Index '{}' is out of bounds", index),
+                    &format!("Index '{}' is out of range", index),
                 ));
             }
 
@@ -587,9 +764,12 @@ mod tests {
             }
 
             match object.body().expressions.as_slice() {
-                [Ast::Assignment(id, expr), Ast::FunctionDef(func)] => {
-                    assert_eq!(id, &"n".into());
-                    assert!(matches!(expr.as_ref(), &Ast::Value(Value::Number(_))));
+                [Ast::Assignment(assignment), Ast::FunctionDef(func)] => {
+                    assert_eq!(assignment.target, AssignmentTarget::Id("n".into()));
+                    assert!(matches!(
+                        assignment.expression.as_ref(),
+                        &Ast::Value(Value::Number(_))
+                    ));
                     assert_eq!(func.name, "test".into());
                     assert!(func.args.is_empty());
                 }
@@ -868,7 +1048,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             parse_expression(pair).unwrap(),
-            Ast::AncestorRef(Box::new(Ast::Variable("foo".into())))
+            Ast::AncestorRef(AncestorRef(Box::new(Ast::Variable("foo".into()))))
         );
 
         let pair = SparkMLParser::parse(Rule::assignment, "foo = [2, 1]")
