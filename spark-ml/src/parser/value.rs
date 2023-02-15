@@ -17,7 +17,7 @@ pub(crate) enum Value {
     Object(Object<Value>),
     String(String),
     Boolean(bool),
-    List(Vec<Value>),
+    List(Rc<Vec<Value>>),
     Number(f64),
     GdValue(String),
     Function(Function),

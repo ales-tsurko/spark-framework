@@ -18,11 +18,14 @@ pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
         Rule::algebraic_expr => todo!(),
         Rule::bool_expr => todo!(),
         Rule::call => parse_call(pair.into_inner().next().unwrap()),
-        Rule::list => Ok(Ast::List(
-            pair.into_inner()
-                .map(|item| parse_expression(item))
-                .collect::<ParseResult<Vec<Ast>>>()?,
-        )),
+        Rule::list => {
+            let list = Rc::new(
+                pair.into_inner()
+                    .map(|item| parse_expression(item))
+                    .collect::<ParseResult<Vec<Ast>>>()?,
+            );
+            Ok(Ast::List(list))
+        }
         Rule::NUMBER => Ok(Ast::Value(Value::Number(pair.as_str().parse().unwrap()))),
         Rule::BOOL => Ok(Ast::Value(Value::Boolean(pair.as_str().parse().unwrap()))),
         Rule::STRING => Ok(Ast::Value(Value::String(
@@ -35,7 +38,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
     }
 }
 
-pub(crate) fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
+fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
     assert!(matches!(pair.as_rule(), Rule::object));
 
     let pairs = pair.into_inner();
@@ -160,17 +163,17 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
             )))
         }
 
-        Rule::ancestor_ref => {
-            let ancestor_ref =
-                AncestorRef(Box::new(parse_call(pair.into_inner().next().unwrap())?));
-            Ok(AssignmentTarget::Ancestor(ancestor_ref))
+        Rule::assign_ancestor => {
+            let assign_ancestor =
+                AssignAncestor::new(parse_assignment_target(pair.into_inner().next().unwrap())?);
+            Ok(AssignmentTarget::Ancestor(assign_ancestor))
         }
 
         _ => unreachable!(),
     }
 }
 
-pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
+fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
     match pair.as_rule() {
         Rule::property_call => {
             let mut inner = pair.into_inner();
@@ -215,7 +218,7 @@ pub(crate) fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
     }
 }
 
-pub(crate) fn parse_expr_body(pair: Pair<Rule>) -> ParseResult<Body> {
+fn parse_expr_body(pair: Pair<Rule>) -> ParseResult<Body> {
     let expressions: Vec<Ast> = pair
         .into_inner()
         .map(parse_expression)
@@ -259,7 +262,7 @@ pub(crate) enum Ast {
     Repeat,
     Algebraic,
     Boolean,
-    List(Vec<Self>),
+    List(Rc<Vec<Self>>),
     ListIndex(ListIndex),
     PropertyCall(Box<Self>, Box<Self>),
 }
@@ -301,11 +304,14 @@ impl Ast {
                 }
             }
 
-            Ast::List(list) => Ok(Value::List(
-                list.iter()
-                    .map(|expr| expr.eval(pair, context.clone()))
-                    .collect::<ParseResult<Vec<Value>>>()?,
-            )),
+            Ast::List(list) => {
+                let list = Rc::new(
+                    list.iter()
+                        .map(|expr| expr.eval(pair, context.clone()))
+                        .collect::<ParseResult<Vec<Value>>>()?,
+                );
+                Ok(Value::List(list))
+            }
 
             Ast::Variable(id) => context
                 .var(id)
@@ -313,10 +319,8 @@ impl Ast {
 
             Ast::AncestorRef(call) => call.eval(pair, context),
 
-            Ast::ListIndex(list_index) => {
-                let list = list_index.eval_target(pair, context.clone())?;
-                list_index.eval_index(list, pair, context)
-            }
+            Ast::ListIndex(list_index) => list_index.eval(pair, context.clone(), context),
+
             _ => todo!(),
         }
     }
@@ -338,28 +342,82 @@ impl Assignment {
 
     pub(crate) fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
         let value = self.expression.eval(pair, caller_ctx.clone())?;
-
-        match &self.target {
-            AssignmentTarget::Id(id) => {
-                caller_ctx.add_var(pair, id.clone(), value.clone())?;
-                Ok(value)
-            }
-
-            AssignmentTarget::Ancestor(ancestor) => todo!(),
-
-            AssignmentTarget::Property(prop_assignment) => todo!(),
-
-            AssignmentTarget::ListIndex(list_index) => list_index.eval(pair, value, caller_ctx),
-        }
+        self.target
+            .assign(value, pair, caller_ctx.clone(), caller_ctx)
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssignmentTarget {
     Id(Id),
-    Ancestor(AncestorRef),
+    Ancestor(AssignAncestor),
     Property(AssignProperty),
     ListIndex(AssignListIndex),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssignAncestor {
+    target: Box<AssignmentTarget>,
+}
+
+impl AssignmentTarget {
+    pub(crate) fn assign(
+        &self,
+        value: Value,
+        pair: &Pair<Rule>,
+        lookup_ctx: Context,
+        caller_ctx: Context,
+    ) -> ParseResult<Value> {
+        match &self {
+            Self::Id(id) => {
+                caller_ctx.add_var(pair, id.clone(), value.clone())?;
+                Ok(value)
+            }
+
+            Self::Ancestor(ancestor) => ancestor.assign(value, pair, lookup_ctx, caller_ctx),
+
+            Self::Property(prop_assignment) => {
+                prop_assignment.assign(value, pair, lookup_ctx, caller_ctx)
+            }
+
+            Self::ListIndex(list_index) => list_index.assign(pair, value, lookup_ctx, caller_ctx),
+        }
+    }
+}
+
+impl AssignAncestor {
+    fn new(target: AssignmentTarget) -> Self {
+        Self {
+            target: Box::new(target),
+        }
+    }
+
+    fn assign(
+        &self,
+        value: Value,
+        pair: &Pair<Rule>,
+        lookup_ctx: Context,
+        caller_ctx: Context,
+    ) -> ParseResult<Value> {
+        match &*self.target {
+            AssignmentTarget::Id(id) => lookup_ctx
+                .find_var_ancestor(id)
+                .ok_or_else(|| custom_error(pair, &format!("'{}' not found", id.as_str())))
+                .map(|ctx| {
+                    ctx.add_var(pair, id.clone(), value.clone())?;
+                    Ok(value)
+                })?,
+
+            AssignmentTarget::ListIndex(list_index) => lookup_ctx
+                .find_var_ancestor(&list_index.target)
+                .ok_or_else(|| {
+                    custom_error(pair, &format!("'{}' not found", list_index.target.as_str()))
+                })
+                .map(|ctx| list_index.assign(pair, value, ctx, caller_ctx))?,
+
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -375,6 +433,34 @@ impl AssignProperty {
             property: Box::new(property),
         }
     }
+
+    pub(crate) fn assign(
+        &self,
+        value: Value,
+        pair: &Pair<Rule>,
+        lookup_ctx: Context,
+        caller_ctx: Context,
+    ) -> ParseResult<Value> {
+        if let Value::Object(obj) = match &*self.target {
+            AssignmentTarget::Ancestor(ancestor) => {
+                AncestorRef::from(ancestor).eval(pair, lookup_ctx)?
+            }
+
+            AssignmentTarget::ListIndex(list_index) => {
+                ListIndex::from(list_index).eval(pair, lookup_ctx, caller_ctx.clone())?
+            }
+            AssignmentTarget::Id(id) => Ast::Variable(id.clone()).eval(pair, lookup_ctx)?,
+            _ => unreachable!(),
+        } {
+            self.property
+                .assign(value, pair, obj.context().clone(), caller_ctx)
+        } else {
+            Err(custom_error(
+                pair,
+                "Property assignment can be applied only to objects",
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,18 +474,19 @@ impl AssignListIndex {
         Self { target, indices }
     }
 
-    pub(crate) fn eval(
+    pub(crate) fn assign(
         &self,
         pair: &Pair<Rule>,
         value: Value,
-        context: Context,
+        lookup_ctx: Context,
+        caller_ctx: Context,
     ) -> ParseResult<Value> {
-        let list = context.var(&self.target).ok_or_else(|| {
+        let list = lookup_ctx.var(&self.target).ok_or_else(|| {
             custom_error(pair, &format!("Value '{}' not found", self.target.as_str()))
         })?;
 
         let mut list = match list {
-            Value::List(list) => list.clone(),
+            Value::List(list) => (*list).clone(),
             _ => {
                 return Err(custom_error(
                     pair,
@@ -408,7 +495,7 @@ impl AssignListIndex {
             }
         };
 
-        let indices = self.eval_indices(pair, context.clone())?;
+        let indices = self.eval_indices(pair, caller_ctx)?;
         let (last, rest) = indices.split_last().unwrap();
         let mut target_ref = &mut list;
 
@@ -422,14 +509,9 @@ impl AssignListIndex {
 
             match target_ref.get_mut(*index) {
                 Some(Value::List(val)) => {
-                    target_ref = val;
+                    target_ref = Rc::get_mut(val).unwrap();
                 }
-                Some(_) => {
-                    return Err(custom_error(
-                        pair,
-                        &format!("'{}' is not a list", self.target.as_str()),
-                    ))
-                }
+                Some(_) => return Err(custom_error(pair, "Only lists can be indexed")),
                 _ => {
                     return Err(custom_error(
                         pair,
@@ -441,9 +523,9 @@ impl AssignListIndex {
 
         target_ref[*last] = value.clone();
 
-        let result = Value::List(list);
+        let result = Value::List(Rc::new(list));
 
-        context.add_var(pair, self.target.clone(), result)?;
+        lookup_ctx.add_var(pair, self.target.clone(), result)?;
 
         Ok(value)
     }
@@ -475,9 +557,20 @@ impl AncestorRef {
         match &*self.0 {
             Ast::Variable(_) => self.eval(pair, parent_ctx),
 
-            Ast::ListIndex(list_index) => {
-                let list = list_index.eval_target(pair, parent_ctx)?;
-                list_index.eval_index(list, pair, caller_ctx)
+            Ast::ListIndex(list_index) => list_index.eval(pair, parent_ctx, caller_ctx),
+
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<&AssignAncestor> for AncestorRef {
+    fn from(ancestor: &AssignAncestor) -> Self {
+        match &*ancestor.target {
+            AssignmentTarget::Id(id) => Self(Box::new(Ast::Variable(id.clone()))),
+
+            AssignmentTarget::ListIndex(list_index) => {
+                Self(Box::new(Ast::ListIndex(list_index.into())))
             }
 
             _ => unreachable!(),
@@ -521,8 +614,7 @@ impl Object<Value> {
 
             Ast::ListIndex(list_index) => {
                 self.context().vars().set_recursive(false);
-                let list = list_index.eval_target(pair, self.context().clone())?;
-                list_index.eval_index(list, pair, caller_ctx)
+                list_index.eval(pair, self.context().clone(), caller_ctx)
             }
 
             Ast::PropertyCall(target, prop) => {
@@ -645,36 +737,42 @@ impl ListIndex {
         }
     }
 
-    pub(crate) fn eval_target(
+    pub(crate) fn eval(
         &self,
         pair: &Pair<Rule>,
-        context: Context,
-    ) -> ParseResult<Vec<Value>> {
-        match self.target.eval(pair, context.clone())? {
-            Value::List(list) => Ok(list),
-            _ => Err(custom_error(pair, "Only lists can be indexed")),
-        }
-    }
-
-    pub(crate) fn eval_index(
-        &self,
-        mut value: Vec<Value>,
-        pair: &Pair<Rule>,
-        context: Context,
+        lookup_ctx: Context,
+        caller_ctx: Context,
     ) -> ParseResult<Value> {
-        if let Value::Number(index) = self.index.eval(pair, context)? {
+        let mut list = match self.target.eval(pair, lookup_ctx.clone())? {
+            Value::List(list) => (*list).clone(),
+            _ => return Err(custom_error(pair, "Only lists can be indexed")),
+        };
+
+        if let Value::Number(index) = self.index.eval(pair, caller_ctx)? {
             let index = index as usize;
 
-            if index >= value.len() {
+            if index >= list.len() {
                 return Err(custom_error(
                     pair,
                     &format!("Index '{}' is out of range", index),
                 ));
             }
 
-            Ok(value.swap_remove(index))
+            Ok(list.swap_remove(index))
         } else {
             Err(custom_error(pair, "Index should be a number"))
+        }
+    }
+}
+
+impl From<&AssignListIndex> for ListIndex {
+    fn from(assign: &AssignListIndex) -> Self {
+        let target = Ast::Variable(assign.target.clone().into());
+        match assign.indices.iter().fold(target, |acc, index| {
+            Ast::ListIndex(ListIndex::new(acc, index.clone()))
+        }) {
+            Ast::ListIndex(index) => index,
+            _ => unreachable!(),
         }
     }
 }
@@ -1221,11 +1319,11 @@ mod tests {
                 .unwrap()
                 .eval(&pair, context)
                 .unwrap(),
-            Value::List(vec![
+            Value::List(Rc::new(vec![
                 Value::Boolean(true),
                 Value::Boolean(false),
                 Value::Boolean(false)
-            ])
+            ]))
         );
     }
 

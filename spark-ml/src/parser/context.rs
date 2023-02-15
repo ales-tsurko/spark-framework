@@ -89,6 +89,17 @@ impl Context {
             )),
         }
     }
+
+    /// Find the ancestor context that contains the given var.
+    pub(crate) fn find_var_ancestor(&self, id: &Id) -> Option<Self> {
+        if self.variables.table.borrow().contains_key(id) {
+            Some(self.clone())
+        } else {
+            self.parent()
+                .as_ref()
+                .and_then(|parent| parent.find_var_ancestor(id))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +121,7 @@ impl<T> Table<T> {
     pub(crate) fn set_recursive(&self, value: bool) {
         self.recursive.set(value);
     }
-    
+
     pub(crate) fn set_all_recursive(&self, value: bool) {
         self.recursive.set(value);
         if let Some(parent) = self.parent.as_ref() {

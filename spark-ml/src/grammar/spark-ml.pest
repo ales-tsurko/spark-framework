@@ -18,9 +18,10 @@ ext_resource = { "ext" ~ ( STRING | ID ) }
 
 sub_resource = { "sub" ~ node }
 
-assignment            = !{ (assign_property | ancestor_ref | assign_list_index | ID) ~ "=" ~ NEWLINE* ~ expression }
+assignment            = !{ (assign_property | assign_ancestor | assign_list_index | ID) ~ "=" ~ NEWLINE* ~ expression }
     assign_list_index = { ID ~ ("[" ~ (NUMBER | call) ~ "]")+ }
-    assign_property   = { (ancestor_ref | assign_list_index | ID) ~ "." ~ (assign_property | assign_list_index | ID) }
+    assign_property   = { (assign_ancestor | assign_list_index | ID) ~ "." ~ (assign_property | assign_list_index | ID) }
+    assign_ancestor   = { "^" ~ (assign_list_index | ID) }
 
 func_def      = !{ (PUSH(INDENT) ~ func_def_in ~ DROP) | func_def_in }
     func_def_in = _{"fn" ~ ID ~ func_args ~ body}
