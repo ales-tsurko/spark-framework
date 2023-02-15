@@ -783,22 +783,34 @@ mod tests {
 
     use super::*;
 
-    macro_rules! parse_err {
-        ($code:literal, $rule:ident, $parse_func:ident) => {{
+    macro_rules! parse {
+        ($code:literal, $rule:ident) => {{
             let pair = SparkMLParser::parse(Rule::$rule, $code)
                 .unwrap()
                 .next()
                 .unwrap();
+
+            pair
+        }};
+    }
+
+    macro_rules! parse_err {
+        ($code:literal, $rule:ident, $parse_func:ident) => {{
+            let pair = parse!($code, $rule);
             assert!($parse_func(pair.clone()).is_err());
+        }};
+    }
+
+    macro_rules! parse_eq {
+        ($code:literal, $rule:ident, $parse_func:ident, $expected:expr) => {{
+            let pair = parse!($code, $rule);
+            assert_eq!($parse_func(pair.clone()).unwrap(), $expected);
         }};
     }
 
     macro_rules! eval_ok {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
-            let pair = SparkMLParser::parse(Rule::$rule, $code)
-                .unwrap()
-                .next()
-                .unwrap();
+            let pair = parse!($code, $rule);
             assert!($parse_func(pair.clone())
                 .unwrap()
                 .eval(&pair, $context)
@@ -808,10 +820,7 @@ mod tests {
 
     macro_rules! eval_err {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
-            let pair = SparkMLParser::parse(Rule::$rule, $code)
-                .unwrap()
-                .next()
-                .unwrap();
+            let pair = parse!($code, $rule);
             assert!($parse_func(pair.clone())
                 .unwrap()
                 .eval(&pair, $context)
@@ -821,10 +830,7 @@ mod tests {
 
     macro_rules! eval_eq {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr, $expected:expr) => {{
-            let pair = SparkMLParser::parse(Rule::$rule, $code)
-                .unwrap()
-                .next()
-                .unwrap();
+            let pair = parse!($code, $rule);
             assert_eq!(
                 $parse_func(pair.clone())
                     .unwrap()
@@ -837,15 +843,13 @@ mod tests {
 
     #[test]
     fn test_function() {
-        let pair = SparkMLParser::parse(
-            Rule::func_def,
+        let pair = parse!(
             r#"fn foo(a, b)
                     n = 10
                     20"#,
-        )
-        .unwrap()
-        .next()
-        .unwrap();
+            func_def
+        );
+
         if let Ast::FunctionDef(function) = parse_func_def(pair).unwrap() {
             assert_eq!(function.name, "foo".into());
             assert_eq!(function.args, vec!["a".into(), "b".into()]);
@@ -854,12 +858,10 @@ mod tests {
             panic!("Expected function definition");
         }
 
-        let pair = SparkMLParser::parse(Rule::call, "foo(true, false)")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair).unwrap(),
+        parse_eq!(
+            "foo(true, false)",
+            call,
+            parse_expression,
             Ast::FunctionCall(
                 "foo".into(),
                 vec![
@@ -872,8 +874,7 @@ mod tests {
 
     #[test]
     fn test_object() {
-        let pair = SparkMLParser::parse(
-            Rule::expression,
+        let pair = parse!(
             r#"{ 
                  foo: test()
                  bar:
@@ -883,10 +884,9 @@ mod tests {
                  n = 1
                  fn test()
                      ^n }"#,
-        )
-        .unwrap()
-        .next()
-        .unwrap();
+            expression
+        );
+
         let expr = parse_object(pair.clone()).unwrap();
 
         if let Ast::Object(object) = expr.clone() {
@@ -1062,49 +1062,33 @@ mod tests {
 
     #[test]
     fn test_variable_call() {
-        let pair = SparkMLParser::parse(Rule::call, "foo")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(parse_expression(pair).unwrap(), Ast::Variable("foo".into()));
+        parse_eq!("foo", call, parse_expression, Ast::Variable("foo".into()));
     }
 
     #[test]
     fn test_list_index() {
         let context = Context::default();
-        let pair = SparkMLParser::parse(Rule::assignment, "foo = [[4,3],[2,1]]")
-            .unwrap()
-            .next()
-            .unwrap();
 
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_ok());
+        eval_ok!(
+            "foo = [[4,3],[2,1]]",
+            assignment,
+            parse_expression,
+            context.clone()
+        );
 
-        let pair = SparkMLParser::parse(Rule::call, "foo[0][1]")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "foo[0][1]",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(3.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "foo[1][1]")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "foo[1][1]",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(1.0)
         );
     }
@@ -1112,13 +1096,10 @@ mod tests {
     #[test]
     fn test_property_call() {
         // property call parsing
-        let pair = SparkMLParser::parse(Rule::call, "foo.bar[0].baz()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone()).unwrap(),
+        parse_eq!(
+            "foo.bar[0].baz()",
+            call,
+            parse_expression,
             Ast::PropertyCall(
                 Box::new(Ast::Variable("foo".into())),
                 Box::new(Ast::PropertyCall(
@@ -1135,211 +1116,129 @@ mod tests {
         let context = Context::default();
 
         // first, we prepare an object
-        let pair = SparkMLParser::parse(
-            Rule::assignment,
+        eval_ok!(
             r#"test = {
-               n = {
-                   n = 1
-                   foo = 2
-                   list = [[1,2],[n,4]]
+                n = {
+                    n = 1
+                    foo = 2
+                    list = [[1,2],[n,4]]
 
-                   fn bar()
-                       foo()
-               }
-               foo = 3
-               bar = 4 # shouldn't be accessible from child object (n)
+                    fn bar()
+                        foo()
+                }
+                foo = 3
+                bar = 4 # shouldn't be accessible from child object (n)
 
-               fn foo()
-                   5
+                fn foo()
+                    5
 
-               fn baz(n)
-                   ^n.n = n
+                fn baz(n)
+                    ^n.n = n
                     n
-           }"#,
-        )
-        .unwrap()
-        .next()
-        .unwrap();
-
-        // evaluate the object
-        parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .unwrap();
+            }"#,
+            assignment,
+            parse_expression,
+            context.clone()
+        );
 
         // the property call shouldn't be recursive (i.e the value should be undefined in this case)
-        let pair = SparkMLParser::parse(Rule::call, "test.n.bar")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_err());
-
-        let pair = SparkMLParser::parse(Rule::call, "test.n.foo()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_err());
+        eval_err!("test.n.bar", call, parse_expression, context.clone());
+        eval_err!("test.n.foo()", call, parse_expression, context.clone());
 
         // the property call should read its own context
-        let pair = SparkMLParser::parse(Rule::call, "test.n.foo")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.n.foo",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(2.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.foo")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.foo",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(3.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.foo()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.foo()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(5.0)
         );
 
         // functions can read parent context
-        let pair = SparkMLParser::parse(Rule::call, "test.n.bar()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.n.bar()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(5.0)
         );
 
         // indexing should be evaluated in the context of the caller (`n` should be undefined here)
-        let pair = SparkMLParser::parse(Rule::call, "test.n.list[n]")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_err());
+        eval_err!("test.n.list[n]", call, parse_expression, context.clone());
 
         // functions can read and modify properties
-        let pair = SparkMLParser::parse(Rule::call, "test.baz(6)")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.baz(6)",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(6.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.n.n")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.n.n",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(6.0)
         );
     }
 
     #[test]
     fn test_ancestor_ref() {
-        let context = Context::default();
-        let pair = SparkMLParser::parse(Rule::call, "^foo")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair).unwrap(),
+        parse_eq!(
+            "^foo",
+            call,
+            parse_expression,
             Ast::AncestorRef(AncestorRef(Box::new(Ast::Variable("foo".into()))))
         );
 
-        let pair = SparkMLParser::parse(Rule::assignment, "foo = [2, 1]")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_ok());
+        let context = Context::default();
 
-        let pair = SparkMLParser::parse(
-            Rule::func_def,
+        eval_ok!(
+            "foo = [2, 1]",
+            assignment,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_ok!(
             r#"fn test_ancestor_ref(n)
                     ^foo[n]"#,
-        )
-        .unwrap()
-        .next()
-        .unwrap();
-        assert!(parse_func_def(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_ok());
+            func_def,
+            parse_func_def,
+            context.clone()
+        );
 
-        let pair = SparkMLParser::parse(Rule::call, "test_ancestor_ref(1)")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context)
-                .unwrap(),
+        eval_eq!(
+            "test_ancestor_ref(1)",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(1.0)
         );
 
         let context = Context::default();
 
-        let pair = SparkMLParser::parse(Rule::assignment, "baz = 1")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_ok());
+        eval_ok!("baz = 1", assignment, parse_expression, context.clone());
 
-        let pair = SparkMLParser::parse(
-            Rule::assignment,
+        eval_ok!(
             r#"test = {
                 bar = 2
 
@@ -1365,104 +1264,61 @@ mod tests {
                         foo # should be undefined
                 }
             }"#,
-        )
-        .unwrap()
-        .next()
-        .unwrap();
+            assignment,
+            parse_expression,
+            context.clone()
+        );
 
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context.clone())
-            .is_ok());
-
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.one()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.obj.one()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(3.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.two()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.obj.two()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(2.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.three()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.obj.three()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(1.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.four(4)")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.obj.four(4)",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(4.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.five()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "test.obj.five()",
+            call,
+            parse_expression,
+            context.clone(),
             Value::Number(3.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::call, "test.obj.six()")
-            .unwrap()
-            .next()
-            .unwrap();
-
-        assert!(parse_expression(pair.clone())
-            .unwrap()
-            .eval(&pair, context)
-            .is_err());
+        eval_err!("test.obj.six()", call, parse_expression, context.clone());
     }
 
     #[test]
     fn test_list() {
-        let context = Context::default();
-        let pair = SparkMLParser::parse(Rule::expression, "[true,false,false]")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context)
-                .unwrap(),
+        eval_eq!(
+            "[true,false,false]",
+            expression,
+            parse_expression,
+            Context::default(),
             Value::List(Rc::new(RefCell::new(vec![
                 Value::Boolean(true),
                 Value::Boolean(false),
@@ -1474,84 +1330,61 @@ mod tests {
     #[test]
     fn test_value() {
         let context = Context::default();
-        let pair = SparkMLParser::parse(Rule::expression, "1")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+
+        eval_eq!(
+            "1",
+            expression,
+            parse_expression,
+            context.clone(),
             Value::Number(1.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::expression, "1.0")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "1.0",
+            expression,
+            parse_expression,
+            context.clone(),
             Value::Number(1.0)
         );
 
-        let pair = SparkMLParser::parse(Rule::expression, "1E-2")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            "1E-2",
+            expression,
+            parse_expression,
+            context.clone(),
             Value::Number(0.01)
         );
 
-        let pair = SparkMLParser::parse(Rule::expression, r#""This is a string\nhello""#)
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            r#""This is a string\nhello""#,
+            expression,
+            parse_expression,
+            context.clone(),
             Value::String("This is a string\\nhello".to_string())
         );
 
-        let pair = SparkMLParser::parse(Rule::expression, r#"`NodePath("Path:")`"#)
-            .unwrap()
-            .next()
-            .unwrap();
-        assert_eq!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone())
-                .unwrap(),
+        eval_eq!(
+            r#"`NodePath("Path:")`"#,
+            expression,
+            parse_expression,
+            context.clone(),
             Value::GdValue("NodePath(\"Path:\")".to_string())
         );
 
-        let pair = SparkMLParser::parse(Rule::expression, "true")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert!(matches!(
-            parse_expression(pair.clone())
-                .unwrap()
-                .eval(&pair, context.clone()),
-            Ok(Value::Boolean(true))
-        ));
+        eval_eq!(
+            "true",
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Boolean(true)
+        );
 
-        let pair = SparkMLParser::parse(Rule::expression, "false")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert!(matches!(
-            parse_expression(pair.clone()).unwrap().eval(&pair, context),
-            Ok(Value::Boolean(false))
-        ));
+        eval_eq!(
+            "false",
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Boolean(false)
+        );
     }
 }
