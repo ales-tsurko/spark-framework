@@ -1,5 +1,6 @@
 //! Value is a concrete stateful data structure.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -17,7 +18,7 @@ pub(crate) enum Value {
     Object(Object<Value>),
     String(String),
     Boolean(bool),
-    List(Rc<Vec<Value>>),
+    List(Rc<RefCell<Vec<Value>>>),
     Number(f64),
     GdValue(String),
     Function(Function),

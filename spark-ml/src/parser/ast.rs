@@ -1,4 +1,6 @@
 //! Abstract syntax tree.
+use std::borrow::BorrowMut;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -153,8 +155,8 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
         }
 
         Rule::assign_list_index => {
-            let inner = pair.clone().into_inner();
-            let id: Id = pair.as_str().into();
+            let mut inner = pair.clone().into_inner();
+            let id: Id = inner.next().unwrap().as_str().into();
             let indices = inner
                 .map(parse_expression)
                 .collect::<ParseResult<Vec<Ast>>>()?;
@@ -284,7 +286,7 @@ impl Ast {
 
             Ast::PropertyCall(target, property) => {
                 if let Value::Object(obj) = target.eval(pair, context.clone())? {
-                    obj.call_poperty(pair, property, context)
+                    obj.call_property(pair, property, context)
                 } else {
                     Err(custom_error(
                         pair,
@@ -305,11 +307,11 @@ impl Ast {
             }
 
             Ast::List(list) => {
-                let list = Rc::new(
+                let list = Rc::new(RefCell::new(
                     list.iter()
                         .map(|expr| expr.eval(pair, context.clone()))
                         .collect::<ParseResult<Vec<Value>>>()?,
-                );
+                ));
                 Ok(Value::List(list))
             }
 
@@ -370,7 +372,7 @@ impl AssignmentTarget {
     ) -> ParseResult<Value> {
         match &self {
             Self::Id(id) => {
-                caller_ctx.add_var(pair, id.clone(), value.clone())?;
+                lookup_ctx.add_var(pair, id.clone(), value.clone())?;
                 Ok(value)
             }
 
@@ -481,12 +483,10 @@ impl AssignListIndex {
         lookup_ctx: Context,
         caller_ctx: Context,
     ) -> ParseResult<Value> {
-        let list = lookup_ctx.var(&self.target).ok_or_else(|| {
+        let list = match lookup_ctx.var(&self.target).ok_or_else(|| {
             custom_error(pair, &format!("Value '{}' not found", self.target.as_str()))
-        })?;
-
-        let mut list = match list {
-            Value::List(list) => (*list).clone(),
+        })? {
+            Value::List(list) => list,
             _ => {
                 return Err(custom_error(
                     pair,
@@ -497,20 +497,18 @@ impl AssignListIndex {
 
         let indices = self.eval_indices(pair, caller_ctx)?;
         let (last, rest) = indices.split_last().unwrap();
-        let mut target_ref = &mut list;
+        let mut target = list.clone();
 
         for index in rest {
-            if index >= &target_ref.len() {
+            if index >= &target.borrow().len() {
                 return Err(custom_error(
                     pair,
                     &format!("Index '{}' out of range", index),
                 ));
             }
 
-            match target_ref.get_mut(*index) {
-                Some(Value::List(val)) => {
-                    target_ref = Rc::get_mut(val).unwrap();
-                }
+            let new_target = match target.borrow().get(*index) {
+                Some(Value::List(val)) => val.clone(),
                 Some(_) => return Err(custom_error(pair, "Only lists can be indexed")),
                 _ => {
                     return Err(custom_error(
@@ -518,14 +516,14 @@ impl AssignListIndex {
                         &format!("Index '{}' is out of range", index),
                     ))
                 }
-            }
+            };
+
+            target = new_target;
         }
 
-        target_ref[*last] = value.clone();
+        (*target).borrow_mut()[*last] = value.clone();
 
-        let result = Value::List(Rc::new(list));
-
-        lookup_ctx.add_var(pair, self.target.clone(), result)?;
+        lookup_ctx.add_var(pair, self.target.clone(), Value::List(list))?;
 
         Ok(value)
     }
@@ -555,7 +553,7 @@ impl AncestorRef {
         parent_ctx.vars().set_all_recursive(true);
 
         match &*self.0 {
-            Ast::Variable(_) => self.eval(pair, parent_ctx),
+            Ast::Variable(_) => self.0.eval(pair, parent_ctx),
 
             Ast::ListIndex(list_index) => list_index.eval(pair, parent_ctx, caller_ctx),
 
@@ -592,7 +590,7 @@ impl Object<Ast> {
 }
 
 impl Object<Value> {
-    pub(crate) fn call_poperty(
+    pub(crate) fn call_property(
         &self,
         pair: &Pair<Rule>,
         property: &Ast,
@@ -622,7 +620,7 @@ impl Object<Value> {
                 self.context().funcs().set_recursive(false);
 
                 match target.eval(pair, self.context().clone())? {
-                    Value::Object(obj) => obj.call_poperty(pair, prop, caller_ctx),
+                    Value::Object(obj) => obj.call_property(pair, prop, caller_ctx),
                     _ => Err(custom_error(
                         pair,
                         "Property call can be applied only to objects",
@@ -743,22 +741,22 @@ impl ListIndex {
         lookup_ctx: Context,
         caller_ctx: Context,
     ) -> ParseResult<Value> {
-        let mut list = match self.target.eval(pair, lookup_ctx.clone())? {
-            Value::List(list) => (*list).clone(),
+        let list = match self.target.eval(pair, lookup_ctx.clone())? {
+            Value::List(list) => list.clone(),
             _ => return Err(custom_error(pair, "Only lists can be indexed")),
         };
 
         if let Value::Number(index) = self.index.eval(pair, caller_ctx)? {
             let index = index as usize;
 
-            if index >= list.len() {
+            if index >= list.borrow().len() {
                 return Err(custom_error(
                     pair,
                     &format!("Index '{}' is out of range", index),
                 ));
             }
 
-            Ok(list.swap_remove(index))
+            Ok((*list).borrow()[index].clone())
         } else {
             Err(custom_error(pair, "Index should be a number"))
         }
@@ -784,6 +782,58 @@ mod tests {
     use crate::parser::SparkMLParser;
 
     use super::*;
+
+    macro_rules! parse_err {
+        ($code:literal, $rule:ident, $parse_func:ident) => {{
+            let pair = SparkMLParser::parse(Rule::$rule, $code)
+                .unwrap()
+                .next()
+                .unwrap();
+            assert!($parse_func(pair.clone()).is_err());
+        }};
+    }
+
+    macro_rules! eval_ok {
+        ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
+            let pair = SparkMLParser::parse(Rule::$rule, $code)
+                .unwrap()
+                .next()
+                .unwrap();
+            assert!($parse_func(pair.clone())
+                .unwrap()
+                .eval(&pair, $context)
+                .is_ok());
+        }};
+    }
+
+    macro_rules! eval_err {
+        ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
+            let pair = SparkMLParser::parse(Rule::$rule, $code)
+                .unwrap()
+                .next()
+                .unwrap();
+            assert!($parse_func(pair.clone())
+                .unwrap()
+                .eval(&pair, $context)
+                .is_err());
+        }};
+    }
+
+    macro_rules! eval_eq {
+        ($code:literal, $rule:ident, $parse_func:ident, $context:expr, $expected:expr) => {{
+            let pair = SparkMLParser::parse(Rule::$rule, $code)
+                .unwrap()
+                .next()
+                .unwrap();
+            assert_eq!(
+                $parse_func(pair.clone())
+                    .unwrap()
+                    .eval(&pair, $context)
+                    .unwrap(),
+                $expected
+            );
+        }};
+    }
 
     #[test]
     fn test_function() {
@@ -896,24 +946,118 @@ mod tests {
     #[test]
     fn test_assignment() {
         let context = Context::default();
-        let pair = SparkMLParser::parse(Rule::assignment, "foo = true")
-            .unwrap()
-            .next()
-            .unwrap();
-        let assignment = parse_assignment(pair.clone()).unwrap();
-        assert_eq!(
-            assignment.eval(&pair, context.clone()).unwrap(),
+
+        eval_eq!(
+            "foo = true",
+            assignment,
+            parse_assignment,
+            context.clone(),
             Value::Boolean(true)
         );
 
-        assert_eq!(context.var(&"foo".into()).unwrap(), Value::Boolean(true));
+        // using another type for already assigned variable is not allowed
+        eval_err!("foo = 1", assignment, parse_assignment, context.clone());
 
         // using reserved keyword is not allowed
-        let pair = SparkMLParser::parse(Rule::assignment, "true = false")
-            .unwrap()
-            .next()
-            .unwrap();
-        assert!(parse_assignment(pair).is_err());
+        parse_err!("true = false", assignment, parse_assignment);
+
+        eval_ok!(
+            r#"test = {
+                foo = 1
+                bar = {
+                    baz = 1
+                    list = [{
+                        foo = [[1, 2], [3, 4]]
+                    }]
+                }
+
+                fn set_foo(n)
+                    ^foo = n
+                    n
+
+                fn set_baz(n)
+                    ^bar.baz = n
+                    n
+                }
+            "#,
+            assignment,
+            parse_assignment,
+            context.clone()
+        );
+
+        eval_eq!(
+            "test.foo",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(1.0)
+        );
+
+        eval_ok!(
+            "test.foo = 2",
+            assignment,
+            parse_assignment,
+            context.clone()
+        );
+
+        eval_eq!(
+            "test.foo",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(2.0)
+        );
+
+        eval_ok!("test.set_foo(3)", call, parse_expression, context.clone());
+
+        eval_eq!(
+            "test.foo",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(3.0)
+        );
+
+        eval_eq!(
+            "test.bar.baz",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(1.0)
+        );
+
+        eval_ok!("test.set_baz(4)", call, parse_expression, context.clone());
+
+        eval_eq!(
+            "test.bar.baz",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(4.0)
+        );
+
+        eval_eq!(
+            "test.bar.list[0].foo[0][1]",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(2.0)
+        );
+
+        eval_ok!(
+            "test.bar.list[0].foo[0][1] = 5",
+            assignment,
+            parse_assignment,
+            context.clone()
+        );
+
+        eval_eq!(
+            "test.bar.list[0].foo[0][1]",
+            call,
+            parse_expression,
+            context.clone(),
+            Value::Number(5.0)
+        );
     }
 
     #[test]
@@ -1319,11 +1463,11 @@ mod tests {
                 .unwrap()
                 .eval(&pair, context)
                 .unwrap(),
-            Value::List(Rc::new(vec![
+            Value::List(Rc::new(RefCell::new(vec![
                 Value::Boolean(true),
                 Value::Boolean(false),
                 Value::Boolean(false)
-            ]))
+            ])))
         );
     }
 
