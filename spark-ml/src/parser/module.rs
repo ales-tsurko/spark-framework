@@ -18,6 +18,7 @@ pub(crate) struct Module {
     context: Context,
     exports_func: HashSet<Id>,
     exports_var: HashSet<Id>,
+    parser: SparkMLParser,
 }
 
 impl Default for Module {
@@ -28,6 +29,7 @@ impl Default for Module {
             context: Default::default(),
             exports_func: Default::default(),
             exports_var: Default::default(),
+            parser: Default::default(),
         }
     }
 }
@@ -56,7 +58,8 @@ impl Module {
             match pair.as_rule() {
                 Rule::ext_resource => module.add_ext_resource(pair)?,
                 Rule::assignment => {
-                    ast::parse_assignment(pair.clone())?.eval(&pair, module.context.clone())?;
+                    ast::parse_assignment(pair.clone(), &module.parser)?
+                        .eval(&pair, module.context.clone())?;
                     ()
                 }
                 Rule::export_var => todo!(),
@@ -80,17 +83,16 @@ impl Module {
                 (false, pair)
             };
 
-            let expr = ast::parse_func_def(pair.clone())?;
-            match expr {
-                Ast::FunctionDef(ref func) => {
-                    let id = func.name.clone();
-                    expr.eval(&pair, self.context.clone())?;
+            let expr = ast::parse_func_def(pair.clone(), &self.parser)?;
+            if let Ast::FunctionDef(ref func) = expr {
+                let id = func.name.clone();
+                expr.eval(&pair, self.context.clone())?;
 
-                    if exports {
-                        self.exports_func.insert(id);
-                    }
+                if exports {
+                    self.exports_func.insert(id);
                 }
-                _ => unreachable!(),
+            } else {
+                unreachable!()
             }
         }
 

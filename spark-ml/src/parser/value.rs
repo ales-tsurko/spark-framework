@@ -92,6 +92,7 @@ impl<T> Attributes<T> {
         let _ = self.0.insert(key, value);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(&self, key: &Key) -> Option<&Attribute<T>> {
         self.0.get(key)
     }

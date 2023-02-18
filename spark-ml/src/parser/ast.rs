@@ -1,5 +1,4 @@
 //! Abstract syntax tree.
-use std::borrow::BorrowMut;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -8,22 +7,23 @@ use pest::iterators::Pair;
 
 use crate::parser::context::Context;
 use crate::parser::value::{self, Attribute, Attributes, Id, Key, Object, Value};
+use crate::parser::SparkMLParser;
 use crate::parser::{custom_error, ParseResult, Rule, RESERVED_WORDS};
 
-pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
+pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     match pair.as_rule() {
         Rule::node => todo!(),
-        Rule::object => parse_object(pair),
-        Rule::assignment => parse_assignment(pair),
+        Rule::object => parse_object(pair, parser),
+        Rule::assignment => parse_assignment(pair, parser),
         Rule::if_expr => todo!(),
         Rule::repeat_expr => todo!(),
-        Rule::algebraic_expr => todo!(),
+        Rule::algebraic_expr => parse_algebraic_expr(pair, parser),
         Rule::bool_expr => todo!(),
-        Rule::call => parse_call(pair.into_inner().next().unwrap()),
+        Rule::call => parse_call(pair.into_inner().next().unwrap(), parser),
         Rule::list => {
             let list = Rc::new(
                 pair.into_inner()
-                    .map(|item| parse_expression(item))
+                    .map(|item| parse_expression(item, parser))
                     .collect::<ParseResult<Vec<Ast>>>()?,
             );
             Ok(Ast::List(list))
@@ -40,7 +40,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>) -> ParseResult<Ast> {
     }
 }
 
-fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
+fn parse_object(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     assert!(matches!(pair.as_rule(), Rule::object));
 
     let pairs = pair.into_inner();
@@ -50,11 +50,11 @@ fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
         |(mut attributes, mut properties), pair| {
             match pair.as_rule() {
                 Rule::attributes => {
-                    attributes = parse_attributes(pair);
+                    attributes = parse_attributes(pair, parser);
                 }
 
                 Rule::properties => {
-                    properties = parse_properties(pair);
+                    properties = parse_properties(pair, parser);
                 }
 
                 _ => unreachable!(),
@@ -73,7 +73,7 @@ fn parse_object(pair: Pair<Rule>) -> ParseResult<Ast> {
     )))
 }
 
-fn parse_attributes(pair: Pair<Rule>) -> ParseResult<Attributes<Ast>> {
+fn parse_attributes(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Attributes<Ast>> {
     assert!(matches!(pair.as_rule(), Rule::attributes));
 
     let mut attributes = Attributes::default();
@@ -91,12 +91,12 @@ fn parse_attributes(pair: Pair<Rule>) -> ParseResult<Attributes<Ast>> {
         match value_pair.as_rule() {
             Rule::attributes => attributes.insert(
                 key,
-                Attribute::Attributes(Rc::new(parse_attributes(value_pair)?)),
+                Attribute::Attributes(Rc::new(parse_attributes(value_pair, parser)?)),
             ),
 
             _ => attributes.insert(
                 key,
-                Attribute::Value(Rc::new(parse_expression(value_pair)?)),
+                Attribute::Value(Rc::new(parse_expression(value_pair, parser)?)),
             ),
         }
     }
@@ -104,31 +104,34 @@ fn parse_attributes(pair: Pair<Rule>) -> ParseResult<Attributes<Ast>> {
     Ok(attributes)
 }
 
-fn parse_properties(pair: Pair<Rule>) -> ParseResult<Vec<Ast>> {
+fn parse_properties(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Vec<Ast>> {
     assert!(matches!(pair.as_rule(), Rule::properties));
 
     pair.into_inner()
         .map(|property| match property.as_rule() {
-            Rule::func_def => parse_func_def(property),
-            Rule::assignment => parse_assignment(property),
+            Rule::func_def => parse_func_def(property, parser),
+            Rule::assignment => parse_assignment(property, parser),
             _ => unreachable!(),
         })
         .collect()
 }
 
-pub(crate) fn parse_assignment(pair: Pair<Rule>) -> ParseResult<Ast> {
+pub(crate) fn parse_assignment(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     assert!(matches!(pair.as_rule(), Rule::assignment));
 
     let mut pairs = pair.clone().into_inner();
     let target = pairs.next().unwrap();
     let expression = pairs.next().unwrap();
-    let expression = parse_expression(expression)?;
-    let target = parse_assignment_target(target)?;
+    let expression = parse_expression(expression, parser)?;
+    let target = parse_assignment_target(target, parser)?;
 
     Ok(Ast::Assignment(Assignment::new(target, expression)))
 }
 
-fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
+fn parse_assignment_target(
+    pair: Pair<Rule>,
+    parser: &SparkMLParser,
+) -> ParseResult<AssignmentTarget> {
     match pair.as_rule() {
         Rule::ID => {
             // in contrast to other assignment targets, IDs can be undefined (we reference others
@@ -147,8 +150,8 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
             let mut inner = pair.into_inner();
             let target = inner.next().unwrap();
             let property = inner.next().unwrap();
-            let target = parse_assignment_target(target)?;
-            let property = parse_assignment_target(property)?;
+            let target = parse_assignment_target(target, parser)?;
+            let property = parse_assignment_target(property, parser)?;
             Ok(AssignmentTarget::Property(AssignProperty::new(
                 target, property,
             )))
@@ -158,7 +161,7 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
             let mut inner = pair.clone().into_inner();
             let id: Id = inner.next().unwrap().as_str().into();
             let indices = inner
-                .map(parse_expression)
+                .map(|expr| parse_expression(expr, parser))
                 .collect::<ParseResult<Vec<Ast>>>()?;
             Ok(AssignmentTarget::ListIndex(AssignListIndex::new(
                 id, indices,
@@ -166,8 +169,10 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
         }
 
         Rule::assign_ancestor => {
-            let assign_ancestor =
-                AssignAncestor::new(parse_assignment_target(pair.into_inner().next().unwrap())?);
+            let assign_ancestor = AssignAncestor::new(parse_assignment_target(
+                pair.into_inner().next().unwrap(),
+                parser,
+            )?);
             Ok(AssignmentTarget::Ancestor(assign_ancestor))
         }
 
@@ -175,7 +180,30 @@ fn parse_assignment_target(pair: Pair<Rule>) -> ParseResult<AssignmentTarget> {
     }
 }
 
-fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
+fn parse_algebraic_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    parser
+        .algebraic
+        .map_primary(|primary| match primary.as_rule() {
+            Rule::call | Rule::NUMBER => parse_expression(primary, parser),
+            Rule::algebraic_expr => parse_algebraic_expr(primary, parser),
+            _ => Err(custom_error(
+                &primary,
+                "Unexpected value in algebraic expression",
+            )),
+        })
+        .map_prefix(|_, rhs| Ok(Ast::Algebraic(Algebraic::new_neg(rhs?))))
+        .map_infix(|lhs, op, rhs| match op.as_rule() {
+            Rule::ADD => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Add, rhs?))),
+            Rule::SUB => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Sub, rhs?))),
+            Rule::MUL => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Mul, rhs?))),
+            Rule::DIV => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Div, rhs?))),
+            Rule::MOD => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Mod, rhs?))),
+            _ => unreachable!(),
+        })
+        .parse(pair.into_inner())
+}
+
+fn parse_call(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     match pair.as_rule() {
         Rule::property_call => {
             let mut inner = pair.into_inner();
@@ -183,17 +211,17 @@ fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
             let property = inner.next().unwrap();
 
             Ok(Ast::PropertyCall(
-                Box::new(parse_call(target)?),
-                Box::new(parse_call(property)?),
+                Box::new(parse_call(target, parser)?),
+                Box::new(parse_call(property, parser)?),
             ))
         }
 
         Rule::list_index => {
             let mut inner = pair.into_inner();
             // NOTE: it can be call only, but not wrapped into Rule::call
-            let expression = parse_call(inner.next().unwrap())?;
+            let expression = parse_call(inner.next().unwrap(), parser)?;
             let indices = inner
-                .map(parse_expression)
+                .map(|expr| parse_expression(expr, parser))
                 .collect::<ParseResult<Vec<Ast>>>()?;
 
             Ok(indices.into_iter().fold(expression, |acc, index| {
@@ -205,7 +233,7 @@ fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
             let mut inner = pair.into_inner();
             let id: Id = inner.next().unwrap().as_str().into();
             let args = inner
-                .map(parse_expression)
+                .map(|expr| parse_expression(expr, parser))
                 .collect::<ParseResult<Vec<Ast>>>()?;
             Ok(Ast::FunctionCall(id, args))
         }
@@ -214,22 +242,23 @@ fn parse_call(pair: Pair<Rule>) -> ParseResult<Ast> {
 
         Rule::ancestor_ref => Ok(Ast::AncestorRef(AncestorRef(Box::new(parse_call(
             pair.into_inner().next().unwrap(),
+            parser,
         )?)))),
 
         _ => unreachable!(),
     }
 }
 
-fn parse_expr_body(pair: Pair<Rule>) -> ParseResult<Body> {
+fn parse_expr_body(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Body> {
     let expressions: Vec<Ast> = pair
         .into_inner()
-        .map(parse_expression)
+        .map(|expr| parse_expression(expr, parser))
         .collect::<ParseResult<Vec<Ast>>>()?;
 
     Ok(Body::new(expressions))
 }
 
-pub(crate) fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Ast> {
+pub(crate) fn parse_func_def(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     let mut inner = pair.into_inner();
     let id_pair = inner.next().unwrap();
     if RESERVED_WORDS.contains(id_pair.as_str()) {
@@ -241,7 +270,7 @@ pub(crate) fn parse_func_def(pair: Pair<Rule>) -> ParseResult<Ast> {
 
     let id = id_pair.as_str().into();
     let args = parse_func_args(inner.next().unwrap())?;
-    let body = parse_expr_body(inner.next().unwrap())?;
+    let body = parse_expr_body(inner.next().unwrap(), parser)?;
 
     Ok(Ast::FunctionDef(Function::new(id, args, body)))
 }
@@ -262,7 +291,7 @@ pub(crate) enum Ast {
     AncestorRef(AncestorRef),
     If,
     Repeat,
-    Algebraic,
+    Algebraic(Algebraic),
     Boolean,
     List(Rc<Vec<Self>>),
     ListIndex(ListIndex),
@@ -576,6 +605,42 @@ impl From<&AssignAncestor> for AncestorRef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Algebraic {
+    Neg(Box<Ast>),
+    In(AlgebraicIn),
+}
+
+impl Algebraic {
+    pub(crate) fn new_neg(expr: Ast) -> Self {
+        Self::Neg(Box::new(expr))
+    }
+
+    pub(crate) fn new_in(left: Ast, operator: Operator, right: Ast) -> Self {
+        Self::In(AlgebraicIn {
+            left: Box::new(left),
+            right: Box::new(right),
+            operator,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlgebraicIn {
+    left: Box<Ast>,
+    right: Box<Ast>,
+    operator: Operator,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Operator {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
 impl Object<Ast> {
     pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Object<Value>> {
         let context = Context::with_parent(context);
@@ -796,22 +861,25 @@ mod tests {
 
     macro_rules! parse_err {
         ($code:literal, $rule:ident, $parse_func:ident) => {{
+            let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
-            assert!($parse_func(pair.clone()).is_err());
+            assert!($parse_func(pair.clone(), &parser).is_err());
         }};
     }
 
     macro_rules! parse_eq {
         ($code:literal, $rule:ident, $parse_func:ident, $expected:expr) => {{
+            let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
-            assert_eq!($parse_func(pair.clone()).unwrap(), $expected);
+            assert_eq!($parse_func(pair.clone(), &parser).unwrap(), $expected);
         }};
     }
 
     macro_rules! eval_ok {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
+            let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
-            assert!($parse_func(pair.clone())
+            assert!($parse_func(pair.clone(), &parser)
                 .unwrap()
                 .eval(&pair, $context)
                 .is_ok());
@@ -820,8 +888,9 @@ mod tests {
 
     macro_rules! eval_err {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
+            let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
-            assert!($parse_func(pair.clone())
+            assert!($parse_func(pair.clone(), &parser)
                 .unwrap()
                 .eval(&pair, $context)
                 .is_err());
@@ -830,9 +899,10 @@ mod tests {
 
     macro_rules! eval_eq {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr, $expected:expr) => {{
+            let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
             assert_eq!(
-                $parse_func(pair.clone())
+                $parse_func(pair.clone(), &parser)
                     .unwrap()
                     .eval(&pair, $context)
                     .unwrap(),
@@ -843,6 +913,7 @@ mod tests {
 
     #[test]
     fn test_function() {
+        let parser = SparkMLParser::default();
         let pair = parse!(
             r#"fn foo(a, b)
                     n = 10
@@ -850,7 +921,7 @@ mod tests {
             func_def
         );
 
-        if let Ast::FunctionDef(function) = parse_func_def(pair).unwrap() {
+        if let Ast::FunctionDef(function) = parse_func_def(pair, &parser).unwrap() {
             assert_eq!(function.name, "foo".into());
             assert_eq!(function.args, vec!["a".into(), "b".into()]);
             assert_eq!(function.body.expressions.len(), 2);
@@ -874,6 +945,7 @@ mod tests {
 
     #[test]
     fn test_object() {
+        let parser = SparkMLParser::default();
         let pair = parse!(
             r#"{ 
                  foo: test()
@@ -887,7 +959,7 @@ mod tests {
             expression
         );
 
-        let expr = parse_object(pair.clone()).unwrap();
+        let expr = parse_object(pair.clone(), &parser).unwrap();
 
         if let Ast::Object(object) = expr.clone() {
             assert_eq!(object.attributes().table().len(), 3);
@@ -1385,6 +1457,68 @@ mod tests {
             parse_expression,
             context.clone(),
             Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn test_algebraic_expr() {
+        parse_eq!(
+            "1 + 2",
+            expression,
+            parse_expression,
+            Ast::Algebraic(Algebraic::new_in(
+                Ast::Value(Value::Number(1.0)),
+                Operator::Add,
+                Ast::Value(Value::Number(2.0))
+            ))
+        );
+
+        parse_eq!(
+            "-(1 + 2) * 3",
+            expression,
+            parse_expression,
+            Ast::Algebraic(Algebraic::new_in(
+                Ast::Algebraic(Algebraic::new_neg(Ast::Algebraic(Algebraic::new_in(
+                    Ast::Value(Value::Number(1.0)),
+                    Operator::Add,
+                    Ast::Value(Value::Number(2.0))
+                )))),
+                Operator::Mul,
+                Ast::Value(Value::Number(3.0))
+            ))
+        );
+
+        parse_eq!(
+            "1 + n * 2 / (10 % call(1,2))",
+            expression,
+            parse_expression,
+            Ast::Algebraic(Algebraic::new_in(
+                Ast::Value(Value::Number(1.0)),
+                Operator::Add,
+                Ast::Algebraic(Algebraic::new_in(
+                    Ast::Algebraic(
+                        // n * 2
+                        Algebraic::new_in(
+                            Ast::Variable("n".into()),
+                            Operator::Mul,
+                            Ast::Value(Value::Number(2.0))
+                        )
+                    ),
+                    Operator::Div,
+                    Ast::Algebraic(Algebraic::new_in(
+                        // (10 % call(1,2))
+                        Ast::Value(Value::Number(10.0)),
+                        Operator::Mod,
+                        Ast::FunctionCall(
+                            "call".into(),
+                            vec![
+                                Ast::Value(Value::Number(1.0)),
+                                Ast::Value(Value::Number(2.0))
+                            ]
+                        )
+                    ))
+                ))
+            ))
         );
     }
 }

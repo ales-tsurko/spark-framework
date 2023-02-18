@@ -61,11 +61,9 @@ body               = ${ blank ~
                        }
     body_statement = _{ assignment }
 
-algebraic_expr      = !{ (MATH_PRE_OP ~ (alg_value | nested_alg_expr)) 
-                         | (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_value | nested_alg_expr))+
-                       }
-    nested_alg_expr = _{ "(" ~ algebraic_expr ~ ")" }
-    alg_value       = _{ call | NUMBER }
+algebraic_expr      = !{ (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_value | nested_alg_expr))+ }
+    nested_alg_expr = _{ MATH_PRE_OP? ~ "(" ~ algebraic_expr ~ ")" }
+    alg_value       = _{ MATH_PRE_OP? ~ call | NUMBER }
 
 bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_value | bool_expr))+ 
                           | nested_bool_expr
@@ -100,9 +98,9 @@ GD_VALUE           = ${ "`" ~ GD_VALUE_INNER ~ "`" }
 STRING             = ${ "\"" ~ STRING_INNER ~ "\"" }
     STRING_INNER   = { (!(NEWLINE | "\"") ~ ANY)* }
 BOOL               = { "true" | "false" }
-MATH_IN_OP         = _{ PLUS | MINUS | DIV | MUL | MOD }
-    PLUS           = { "+" }
-    MINUS          = { "-" }
+MATH_IN_OP         = _{ ADD | SUB | DIV | MUL | MOD }
+    ADD            = { "+" }
+    SUB            = { "-" }
     DIV            = { "/" }
     MUL            = { "*" }
     MOD            = { "%" }
