@@ -352,6 +352,8 @@ impl Ast {
 
             Ast::ListIndex(list_index) => list_index.eval(pair, context.clone(), context),
 
+            Ast::Algebraic(expr) => expr.eval(pair, context),
+
             _ => todo!(),
         }
     }
@@ -622,6 +624,31 @@ impl Algebraic {
             right: Box::new(right),
             operator,
         })
+    }
+
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        match self {
+            Self::Neg(expr) => Ok(Value::Number(self.eval_num(expr, pair, context)? * -1.0)),
+            Self::In(algebraic) => {
+                let lhs = self.eval_num(&algebraic.left, pair, context.clone())?;
+                let rhs = self.eval_num(&algebraic.right, pair, context)?;
+
+                Ok(Value::Number(match algebraic.operator {
+                    Operator::Add => lhs + rhs,
+                    Operator::Sub => lhs - rhs,
+                    Operator::Mul => lhs * rhs,
+                    Operator::Div => lhs / rhs,
+                    Operator::Mod => lhs % rhs,
+                }))
+            }
+        }
+    }
+
+    fn eval_num(&self, expr: &Ast, pair: &Pair<Rule>, context: Context) -> ParseResult<f64> {
+        match expr.eval(pair, context)? {
+            Value::Number(num) => Ok(num),
+            _ => Err(custom_error(pair, "Expected a number")),
+        }
     }
 }
 
@@ -1519,6 +1546,45 @@ mod tests {
                     ))
                 ))
             ))
+        );
+
+        let context = Context::default();
+
+        eval_ok!(
+            "n = 2 * 3",
+            assignment,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_ok!(
+            "fn call(a, b)
+                a + b",
+            func_def,
+            parse_func_def,
+            context.clone()
+        );
+
+        eval_eq!(
+            "1 + n * 2 / (10 % call(1,2))",
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(1.0 + 2.0 * 3.0 * 2.0 / (10.0 % (1.0 + 2.0)))
+        );
+
+        eval_ok!(
+            "bar = true",
+            assignment,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_err!(
+            "bar * 2",
+            expression,
+            parse_expression,
+            context.clone()
         );
     }
 }
