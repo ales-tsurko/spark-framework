@@ -1,8 +1,8 @@
 //! Abstract syntax tree.
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
 use pest::iterators::Pair;
 
 use crate::parser::context::Context;
@@ -768,7 +768,7 @@ impl Attributes<Ast> {
         pair: &Pair<Rule>,
         context: Context,
     ) -> ParseResult<Attributes<Value>> {
-        let mut table = HashMap::new();
+        let mut table = IndexMap::new();
 
         for (key, attr) in self.table() {
             table.insert(key.clone(), attr.eval(pair, context.clone())?);

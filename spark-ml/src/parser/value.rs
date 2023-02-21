@@ -1,10 +1,10 @@
 //! Value is a concrete stateful data structure.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
 use pest::iterators::Pair;
 
 use crate::parser::ast::{Ast, Body};
@@ -42,8 +42,8 @@ impl Value {
 impl ToString for Value {
     fn to_string(&self) -> String {
         match self {
-            Self::Node => "Node".to_string(),
-            Self::Object(_) => "Object".to_string(),
+            Self::Node => todo!(),
+            Self::Object(obj) => obj.attributes().to_string(&mut vec![]),
             Self::String(s) => s.to_string(),
             Self::Boolean(b) => b.to_string(),
             Self::List(l) => l
@@ -56,6 +56,47 @@ impl ToString for Value {
             Self::GdValue(s) => s.to_string(),
             Self::Function(f) => f.name.as_str().to_string(),
         }
+    }
+}
+
+macro_rules! impl_from {
+    ($($val:ty,$var:ident),*) => {
+        $(
+            impl From<$val> for Value {
+                fn from(v: $val) -> Self {
+                    Self::$var(v)
+                }
+            }
+        )*
+    };
+}
+
+impl_from!(
+    String,
+    String,
+    //
+    bool,
+    Boolean,
+    //
+    f64,
+    Number,
+    //
+    Object<Value>,
+    Object,
+    //
+    Function,
+    Function
+);
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Self::String(s.to_string())
+    }
+}
+
+impl From<Vec<Value>> for Value {
+    fn from(v: Vec<Value>) -> Self {
+        Self::List(Rc::new(RefCell::new(v)))
     }
 }
 
@@ -95,16 +136,44 @@ impl<T> Object<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Attributes<T>(HashMap<Key, Attribute<T>>);
+pub(crate) struct Attributes<T>(IndexMap<Key, Attribute<T>>);
+
+impl<T: ToString> Attributes<T> {
+    fn to_string(&self, indent: &mut Vec<String>) -> String {
+        let level = "  ";
+
+        self.0
+            .iter()
+            .map(|(k, v)| match v {
+                Attribute::Value(v) => {
+                    format!("{}{}: {}", indent.join(""), k.to_string(), v.to_string())
+                }
+                Attribute::Attributes(attrs) => {
+                    let indent_s = indent.join("");
+                    indent.push(level.to_string());
+                    let res = format!(
+                        "{}{}:\n{}",
+                        indent_s,
+                        k.to_string(),
+                        attrs.to_string(indent)
+                    );
+                    indent.pop();
+                    res
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+}
 
 impl<T> Default for Attributes<T> {
     fn default() -> Self {
-        Self(HashMap::new())
+        Self(IndexMap::new())
     }
 }
 
 impl<T> Attributes<T> {
-    pub(crate) fn new(table: HashMap<Key, Attribute<T>>) -> Self {
+    pub(crate) fn new(table: IndexMap<Key, Attribute<T>>) -> Self {
         Self(table)
     }
 
@@ -117,7 +186,7 @@ impl<T> Attributes<T> {
         self.0.get(key)
     }
 
-    pub(crate) fn table(&self) -> &HashMap<Key, Attribute<T>> {
+    pub(crate) fn table(&self) -> &IndexMap<Key, Attribute<T>> {
         &self.0
     }
 }
@@ -128,10 +197,39 @@ impl<T: PartialEq> PartialEq for Attributes<T> {
     }
 }
 
+impl<T> From<IndexMap<Key, Attribute<T>>> for Attributes<T> {
+    fn from(table: IndexMap<Key, Attribute<T>>) -> Self {
+        Self(table)
+    }
+}
+
+impl<T, const N: usize> From<[(Key, Attribute<T>); N]> for Attributes<T> {
+    fn from(table: [(Key, Attribute<T>); N]) -> Self {
+        Self(table.into())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Key {
     Key(Id),
     MetaKey(Id),
+}
+
+impl ToString for Key {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Key(id) | Self::MetaKey(id) => id.0.to_string(),
+        }
+    }
+}
+
+impl From<&str> for Key {
+    fn from(s: &str) -> Self {
+        if s.starts_with("@") {
+            return Self::MetaKey(Id(s.to_string()));
+        }
+        Self::Key(Id(s.to_string()))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +245,44 @@ impl<T: PartialEq> PartialEq for Attribute<T> {
             (Self::Attributes(a), Self::Attributes(b)) => a == b,
             _ => false,
         }
+    }
+}
+
+impl From<Value> for Attribute<Value> {
+    fn from(v: Value) -> Self {
+        Self::Value(Rc::new(v))
+    }
+}
+
+macro_rules! impl_from_value {
+    ($($t:ty),*) => {
+        $(
+            impl From<$t> for Attribute<Value> {
+                fn from(v: $t) -> Self {
+                    Self::Value(Rc::new(v.into()))
+                }
+            }
+        )*
+    };
+}
+
+impl_from_value!(f64, bool, &str, String, Object<Value>, Vec<Value>, Function);
+
+impl<T> From<Attributes<T>> for Attribute<T> {
+    fn from(attrs: Attributes<T>) -> Self {
+        Self::Attributes(Rc::new(attrs))
+    }
+}
+
+impl<T> From<IndexMap<Key, Attribute<T>>> for Attribute<T> {
+    fn from(table: IndexMap<Key, Attribute<T>>) -> Self {
+        Self::Attributes(Rc::new(table.into()))
+    }
+}
+
+impl<T, const N: usize> From<[(Key, Attribute<T>); N]> for Attribute<T> {
+    fn from(table: [(Key, Attribute<T>); N]) -> Self {
+        Self::Attributes(Rc::new(table.into()))
     }
 }
 
@@ -225,5 +361,32 @@ impl From<String> for Id {
 impl From<&str> for Id {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_string() {
+        let attrs: Attributes<Value> = [
+            ("a".into(), 1.0.into()),
+            (
+                "b".into(),
+                [("c".into(), 2.0.into()), ("d".into(), 3.0.into())].into(),
+            ),
+            (
+                "e".into(),
+                [("f".into(), [("g".into(), 4.0.into())].into())].into(),
+            ),
+            ("h".into(), 5.0.into()),
+        ]
+        .into();
+
+        assert_eq!(
+            "a: 1\nb:\n  c: 2\n  d: 3\ne:\n  f:\n    g: 4\nh: 5".to_string(),
+            attrs.to_string(&mut vec![]),
+        );
     }
 }
