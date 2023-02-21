@@ -365,8 +365,29 @@ impl Ast {
 
             Ast::Algebraic(expr) => expr.eval(pair, context),
 
+            Ast::StringExpr(exprs) => Self::eval_string_expr(exprs, pair, context),
+
             _ => todo!(),
         }
+    }
+
+    fn eval_string_expr(exprs: &[Self], pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        exprs
+            .iter()
+            .map(|expr| match expr {
+                Self::Value(Value::String(s)) => Ok(s.clone()),
+                expr => {
+                    let value = expr.eval(pair, context.clone())?;
+                    Ok(value.to_string())
+                }
+            })
+            .fold(Ok(String::new()), |acc, expr: ParseResult<String>| {
+                let mut acc = acc?;
+                let expr = expr?;
+                acc.push_str(&expr);
+                Ok(acc)
+            })
+            .map(Value::String)
     }
 }
 
@@ -1613,6 +1634,26 @@ mod tests {
                 ),
                 Ast::Value(Value::String(" ".to_string()))
             ]))
-        )
+        );
+
+        let context = Context::default();
+
+        eval_ok!("foo = 1", assignment, parse_expression, context.clone());
+        eval_ok!("bar = 2", assignment, parse_expression, context.clone());
+        eval_ok!(
+            r#"fn call(a, b)
+                a + b"#,
+            func_def,
+            parse_func_def,
+            context.clone()
+        );
+
+        eval_eq!(
+            r#""{foo}\{{bar}} \{te} test { call(3,4) } ""#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::String("1\\{2} \\{te} test 7 ".to_string())
+        );
     }
 }

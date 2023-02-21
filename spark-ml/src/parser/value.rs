@@ -39,6 +39,26 @@ impl Value {
     }
 }
 
+impl ToString for Value {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Node => "Node".to_string(),
+            Self::Object(_) => "Object".to_string(),
+            Self::String(s) => s.to_string(),
+            Self::Boolean(b) => b.to_string(),
+            Self::List(l) => l
+                .borrow()
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+            Self::Number(n) => n.to_string(),
+            Self::GdValue(s) => s.to_string(),
+            Self::Function(f) => f.name.as_str().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Object<T> {
     attributes: Rc<Attributes<T>>,
