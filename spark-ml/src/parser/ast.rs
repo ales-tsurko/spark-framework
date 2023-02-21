@@ -30,9 +30,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> Pars
         }
         Rule::NUMBER => Ok(Ast::Value(Value::Number(pair.as_str().parse().unwrap()))),
         Rule::BOOL => Ok(Ast::Value(Value::Boolean(pair.as_str().parse().unwrap()))),
-        Rule::STRING => Ok(Ast::Value(Value::String(
-            pair.into_inner().next().unwrap().as_str().into(),
-        ))),
+        Rule::STRING => parse_string_expr(pair, parser),
         Rule::GD_VALUE => Ok(Ast::Value(Value::GdValue(
             pair.into_inner().next().unwrap().as_str().into(),
         ))),
@@ -279,12 +277,25 @@ fn parse_func_args(pair: Pair<Rule>) -> ParseResult<Vec<Id>> {
     pair.into_inner().map(|id| Ok(id.as_str().into())).collect()
 }
 
+fn parse_string_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    Ok(Ast::StringExpr(Rc::new(
+        pair.into_inner()
+            .map(|pair| match pair.as_rule() {
+                Rule::STRING_INTERP => parse_expression(pair.into_inner().next().unwrap(), parser),
+                Rule::STRING_INNER => Ok(Ast::Value(Value::String(pair.as_str().into()))),
+                _ => unreachable!(),
+            })
+            .collect::<ParseResult<_>>()?,
+    )))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub(crate) enum Ast {
     Assignment(Assignment),
     Object(Object<Self>),
     Value(Value),
+    StringExpr(Rc<Vec<Self>>),
     FunctionCall(Id, Vec<Self>),
     FunctionDef(Function),
     Variable(Id),
@@ -1550,12 +1561,7 @@ mod tests {
 
         let context = Context::default();
 
-        eval_ok!(
-            "n = 2 * 3",
-            assignment,
-            parse_expression,
-            context.clone()
-        );
+        eval_ok!("n = 2 * 3", assignment, parse_expression, context.clone());
 
         eval_ok!(
             "fn call(a, b)
@@ -1573,18 +1579,40 @@ mod tests {
             Value::Number(1.0 + 2.0 * 3.0 * 2.0 / (10.0 % (1.0 + 2.0)))
         );
 
-        eval_ok!(
-            "bar = true",
-            assignment,
-            parse_expression,
-            context.clone()
-        );
+        eval_ok!("bar = true", assignment, parse_expression, context.clone());
 
-        eval_err!(
-            "bar * 2",
+        eval_err!("bar * 2", expression, parse_expression, context.clone());
+    }
+
+    #[test]
+    fn test_string() {
+        parse_eq!(
+            r#""This is a string\nhello""#,
             expression,
             parse_expression,
-            context.clone()
+            Ast::StringExpr(Rc::new(vec![Ast::Value(Value::String(
+                "This is a string\\nhello".to_string()
+            ))]))
         );
+
+        parse_eq!(
+            r#""{foo}\{{bar}} \{te} test { call(0,1) } ""#,
+            expression,
+            parse_expression,
+            Ast::StringExpr(Rc::new(vec![
+                Ast::Variable("foo".into()),
+                Ast::Value(Value::String("\\{".to_string())),
+                Ast::Variable("bar".into()),
+                Ast::Value(Value::String("} \\{te} test ".to_string())),
+                Ast::FunctionCall(
+                    "call".into(),
+                    vec![
+                        Ast::Value(Value::Number(0.0)),
+                        Ast::Value(Value::Number(1.0))
+                    ]
+                ),
+                Ast::Value(Value::String(" ".to_string()))
+            ]))
+        )
     }
 }
