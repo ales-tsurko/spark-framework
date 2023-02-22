@@ -65,13 +65,11 @@ algebraic_expr      = !{ (alg_value | nested_alg_expr) ~ (MATH_IN_OP ~ (alg_valu
     nested_alg_expr = _{ MATH_PRE_OP? ~ "(" ~ algebraic_expr ~ ")" }
     alg_value       = _{ MATH_PRE_OP? ~ call | NUMBER }
 
-bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_value | bool_expr))+ 
-                          | nested_bool_expr
-                        }
+bool_expr            = !{ (bool_value | nested_bool_expr) ~ (BOOL_IN_OP ~ (bool_value | bool_expr))* }
     nested_bool_expr = _{ BOOL_PRE_OP? ~ "(" ~ bool_expr ~ ")" }
     bool_value       = _{ BOOL_PRE_OP?  ~ (BOOL | comparison | call) }
         comparison   = { comp_value ~ COMP_OP ~ comp_value }
-        comp_value   = _{ NUMBER | STRING | call }
+        comp_value   = _{ NUMBER | STRING | BOOL | call }
 
 call              = !{ property_call | ancestor_ref | list_index | fn_call | var_call }
     fn_call       = { ID ~ "(" ~ NEWLINE* ~ (expression ~ ("," ~ NEWLINE* ~ expression ~ NEWLINE*)*)? ~ ")" }
@@ -112,7 +110,7 @@ BOOL_IN_OP         = _{ AND | OR }
     OR             = { "||" }
 BOOL_PRE_OP        = _{ NOT }
     NOT            = { "!" }
-COMP_OP            = _{ EQ | NEQ | LT | GT | LT_EQ | GT_EQ }
+COMP_OP            = _{ EQ | NEQ | LT_EQ | GT_EQ | LT | GT }
     EQ             = { "==" }
     NEQ            = { "!=" }
     LT             = { "<" }

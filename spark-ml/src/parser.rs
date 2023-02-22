@@ -36,8 +36,8 @@ impl Default for SparkMLParser {
         let algebraic = PrattParser::new()
             .op(Op::infix(Rule::ADD, Assoc::Left) | Op::infix(Rule::SUB, Assoc::Left))
             .op(Op::infix(Rule::MUL, Assoc::Left)
-            | Op::infix(Rule::DIV, Assoc::Left)
-            | Op::infix(Rule::MOD, Assoc::Left))
+                | Op::infix(Rule::DIV, Assoc::Left)
+                | Op::infix(Rule::MOD, Assoc::Left))
             .op(Op::prefix(Rule::NEG));
 
         let boolean = PrattParser::new()

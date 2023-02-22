@@ -18,7 +18,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> Pars
         Rule::if_expr => todo!(),
         Rule::repeat_expr => todo!(),
         Rule::algebraic_expr => parse_algebraic_expr(pair, parser),
-        Rule::bool_expr => todo!(),
+        Rule::bool_expr => parse_boolean_expr(pair, parser),
         Rule::call => parse_call(pair.into_inner().next().unwrap(), parser),
         Rule::list => {
             let list = Rc::new(
@@ -190,13 +190,70 @@ fn parse_algebraic_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult
             )),
         })
         .map_prefix(|_, rhs| Ok(Ast::Algebraic(Algebraic::new_neg(rhs?))))
-        .map_infix(|lhs, op, rhs| match op.as_rule() {
-            Rule::ADD => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Add, rhs?))),
-            Rule::SUB => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Sub, rhs?))),
-            Rule::MUL => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Mul, rhs?))),
-            Rule::DIV => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Div, rhs?))),
-            Rule::MOD => Ok(Ast::Algebraic(Algebraic::new_in(lhs?, Operator::Mod, rhs?))),
-            _ => unreachable!(),
+        .map_infix(|lhs, op, rhs| {
+            let op = match op.as_rule() {
+                Rule::ADD => MathOperator::Add,
+                Rule::SUB => MathOperator::Sub,
+                Rule::MUL => MathOperator::Mul,
+                Rule::DIV => MathOperator::Div,
+                Rule::MOD => MathOperator::Mod,
+                _ => unreachable!(),
+            };
+
+            Ok(Ast::Algebraic(Algebraic::new_in(lhs?, op, rhs?)))
+        })
+        .parse(pair.into_inner())
+}
+
+fn parse_boolean_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    parser
+        .boolean
+        .map_primary(|primary| match primary.as_rule() {
+            Rule::call | Rule::BOOL => parse_expression(primary, parser),
+            Rule::bool_expr => parse_boolean_expr(primary, parser),
+            Rule::comparison => parse_comparison(primary, parser),
+            _ => Err(custom_error(
+                &primary,
+                "Unexpected value in boolean expression",
+            )),
+        })
+        .map_prefix(|_, rhs| Ok(Ast::Boolean(Boolean::new_not(rhs?))))
+        .map_infix(|lhs, op, rhs| {
+            let op = match op.as_rule() {
+                Rule::AND => BoolOperator::And,
+                Rule::OR => BoolOperator::Or,
+                _ => unreachable!(),
+            };
+
+            Ok(Ast::Boolean(Boolean::new_in(lhs?, op, rhs?)))
+        })
+        .parse(pair.into_inner())
+}
+
+fn parse_comparison(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    parser
+        .boolean
+        .map_primary(|primary| match primary.as_rule() {
+            Rule::call | Rule::STRING | Rule::NUMBER | Rule::BOOL => {
+                parse_expression(primary, parser)
+            }
+            _ => Err(custom_error(
+                &primary,
+                "Unexpected value in comparison expression",
+            )),
+        })
+        .map_infix(|lhs, op, rhs| {
+            let op = match op.as_rule() {
+                Rule::EQ => CompOperator::Eq,
+                Rule::NEQ => CompOperator::Neq,
+                Rule::LT => CompOperator::Lt,
+                Rule::GT => CompOperator::Gt,
+                Rule::LT_EQ => CompOperator::LtEq,
+                Rule::GT_EQ => CompOperator::GtEq,
+                _ => unreachable!(),
+            };
+
+            Ok(Ast::Boolean(Boolean::new_comp(lhs?, op, rhs?)))
         })
         .parse(pair.into_inner())
 }
@@ -303,7 +360,7 @@ pub(crate) enum Ast {
     If,
     Repeat,
     Algebraic(Algebraic),
-    Boolean,
+    Boolean(Boolean),
     List(Rc<Vec<Self>>),
     ListIndex(ListIndex),
     PropertyCall(Box<Self>, Box<Self>),
@@ -364,6 +421,8 @@ impl Ast {
             Ast::ListIndex(list_index) => list_index.eval(pair, context.clone(), context),
 
             Ast::Algebraic(expr) => expr.eval(pair, context),
+
+            Ast::Boolean(expr) => expr.eval(pair, context),
 
             Ast::StringExpr(exprs) => Self::eval_string_expr(exprs, pair, context),
 
@@ -650,7 +709,7 @@ impl Algebraic {
         Self::Neg(Box::new(expr))
     }
 
-    pub(crate) fn new_in(left: Ast, operator: Operator, right: Ast) -> Self {
+    pub(crate) fn new_in(left: Ast, operator: MathOperator, right: Ast) -> Self {
         Self::In(AlgebraicIn {
             left: Box::new(left),
             right: Box::new(right),
@@ -666,11 +725,11 @@ impl Algebraic {
                 let rhs = self.eval_num(&algebraic.right, pair, context)?;
 
                 Ok(Value::Number(match algebraic.operator {
-                    Operator::Add => lhs + rhs,
-                    Operator::Sub => lhs - rhs,
-                    Operator::Mul => lhs * rhs,
-                    Operator::Div => lhs / rhs,
-                    Operator::Mod => lhs % rhs,
+                    MathOperator::Add => lhs + rhs,
+                    MathOperator::Sub => lhs - rhs,
+                    MathOperator::Mul => lhs * rhs,
+                    MathOperator::Div => lhs / rhs,
+                    MathOperator::Mod => lhs % rhs,
                 }))
             }
         }
@@ -688,16 +747,125 @@ impl Algebraic {
 pub(crate) struct AlgebraicIn {
     left: Box<Ast>,
     right: Box<Ast>,
-    operator: Operator,
+    operator: MathOperator,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Operator {
+pub(crate) enum MathOperator {
     Add,
     Sub,
     Mul,
     Div,
     Mod,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Boolean {
+    Not(Box<Ast>),
+    In(BooleanIn),
+    Comp(Comparison),
+}
+
+impl Boolean {
+    pub(crate) fn new_not(expr: Ast) -> Self {
+        Self::Not(Box::new(expr))
+    }
+
+    pub(crate) fn new_in(left: Ast, operator: BoolOperator, right: Ast) -> Self {
+        Self::In(BooleanIn {
+            left: Box::new(left),
+            right: Box::new(right),
+            operator,
+        })
+    }
+
+    pub(crate) fn new_comp(left: Ast, operator: CompOperator, right: Ast) -> Self {
+        Self::Comp(Comparison {
+            left: Box::new(left),
+            operator,
+            right: Box::new(right),
+        })
+    }
+
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        match self {
+            Self::Not(expr) => Ok(Value::Boolean(!self.eval_bool(expr, pair, context)?)),
+            Self::In(boolean) => {
+                let lhs = self.eval_bool(&boolean.left, pair, context.clone())?;
+                let rhs = self.eval_bool(&boolean.right, pair, context)?;
+
+                Ok(Value::Boolean(match boolean.operator {
+                    BoolOperator::And => lhs && rhs,
+                    BoolOperator::Or => lhs || rhs,
+                }))
+            }
+            Self::Comp(comp) => comp.eval(pair, context.clone()),
+        }
+    }
+
+    fn eval_bool(&self, expr: &Ast, pair: &Pair<Rule>, context: Context) -> ParseResult<bool> {
+        match expr.eval(pair, context)? {
+            Value::Boolean(bool) => Ok(bool),
+            _ => Err(custom_error(pair, "Expected a boolean")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BooleanIn {
+    left: Box<Ast>,
+    operator: BoolOperator,
+    right: Box<Ast>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BoolOperator {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Comparison {
+    left: Box<Ast>,
+    operator: CompOperator,
+    right: Box<Ast>,
+}
+
+impl Comparison {
+    fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        macro_rules! compare {
+            ($lhs:ident, $rhs:ident) => {
+                Ok(Value::Boolean(match self.operator {
+                    CompOperator::Lt => $lhs < $rhs,
+                    CompOperator::Gt => $lhs > $rhs,
+                    CompOperator::Eq => $lhs == $rhs,
+                    CompOperator::Neq => $lhs != $rhs,
+                    CompOperator::LtEq => $lhs <= $rhs,
+                    CompOperator::GtEq => $lhs >= $rhs,
+                }))
+            };
+        }
+
+        let lhs = self.left.eval(pair, context.clone())?;
+        let rhs = self.right.eval(pair, context)?;
+
+        match (lhs, rhs) {
+            (Value::Number(lhs), Value::Number(rhs)) => compare!(lhs, rhs),
+            (Value::String(lhs), Value::String(rhs)) => compare!(lhs, rhs),
+            (Value::Boolean(lhs), Value::Boolean(rhs)) => compare!(lhs, rhs),
+            _ => Err(custom_error(pair, "Cannot compare types")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CompOperator {
+    Lt,
+    Gt,
+    Eq,
+    Neq,
+    LtEq,
+    GtEq,
 }
 
 impl Object<Ast> {
@@ -1527,7 +1695,7 @@ mod tests {
             parse_expression,
             Ast::Algebraic(Algebraic::new_in(
                 Ast::Value(Value::Number(1.0)),
-                Operator::Add,
+                MathOperator::Add,
                 Ast::Value(Value::Number(2.0))
             ))
         );
@@ -1539,10 +1707,10 @@ mod tests {
             Ast::Algebraic(Algebraic::new_in(
                 Ast::Algebraic(Algebraic::new_neg(Ast::Algebraic(Algebraic::new_in(
                     Ast::Value(Value::Number(1.0)),
-                    Operator::Add,
+                    MathOperator::Add,
                     Ast::Value(Value::Number(2.0))
                 )))),
-                Operator::Mul,
+                MathOperator::Mul,
                 Ast::Value(Value::Number(3.0))
             ))
         );
@@ -1553,21 +1721,21 @@ mod tests {
             parse_expression,
             Ast::Algebraic(Algebraic::new_in(
                 Ast::Value(Value::Number(1.0)),
-                Operator::Add,
+                MathOperator::Add,
                 Ast::Algebraic(Algebraic::new_in(
                     Ast::Algebraic(
                         // n * 2
                         Algebraic::new_in(
                             Ast::Variable("n".into()),
-                            Operator::Mul,
+                            MathOperator::Mul,
                             Ast::Value(Value::Number(2.0))
                         )
                     ),
-                    Operator::Div,
+                    MathOperator::Div,
                     Ast::Algebraic(Algebraic::new_in(
                         // (10 % call(1,2))
                         Ast::Value(Value::Number(10.0)),
-                        Operator::Mod,
+                        MathOperator::Mod,
                         Ast::FunctionCall(
                             "call".into(),
                             vec![
@@ -1603,6 +1771,67 @@ mod tests {
         eval_ok!("bar = true", assignment, parse_expression, context.clone());
 
         eval_err!("bar * 2", expression, parse_expression, context.clone());
+    }
+
+    #[test]
+    fn test_boolean_expr() {
+        parse_eq!(
+            "true && false",
+            expression,
+            parse_expression,
+            Ast::Boolean(Boolean::new_in(
+                Ast::Value(Value::Boolean(true)),
+                BoolOperator::And,
+                Ast::Value(Value::Boolean(false))
+            ))
+        );
+
+        parse_eq!(
+            "10 < 1",
+            expression,
+            parse_expression,
+            Ast::Boolean(Boolean::new_comp(
+                Ast::Value(Value::Number(10.0)),
+                CompOperator::Lt,
+                Ast::Value(Value::Number(1.0))
+            ))
+        );
+
+        let context = Context::default();
+
+        eval_eq!(
+            "true && false",
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Boolean(false)
+        );
+
+        eval_eq!(
+            "10 < 1",
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Boolean(false)
+        );
+
+        eval_ok!("n = 1", assignment, parse_expression, context.clone());
+        eval_ok!("z = 2", assignment, parse_expression, context.clone());
+        eval_ok!("a = true", assignment, parse_expression, context.clone());
+        eval_ok!("b = false", assignment, parse_expression, context.clone());
+
+        let n = 1.0;
+        let z = 2.0;
+        let a = true;
+        let b = false;
+
+        eval_eq!(
+            "!(n < z && a) || !a || (n >= z || n != z && !b)",
+            expression,
+            parse_expression,
+            context,
+            Value::Boolean(!(n < z && a) || !a || (n >= z || n != z && !b))
+        );
     }
 
     #[test]
