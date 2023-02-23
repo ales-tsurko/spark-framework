@@ -15,7 +15,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> Pars
         Rule::node => todo!(),
         Rule::object => parse_object(pair, parser),
         Rule::assignment => parse_assignment(pair, parser),
-        Rule::if_expr => todo!(),
+        Rule::if_expr => Ok(Ast::If(parse_if_expr(pair, parser)?)),
         Rule::repeat_expr => todo!(),
         Rule::algebraic_expr => parse_algebraic_expr(pair, parser),
         Rule::bool_expr => parse_boolean_expr(pair, parser),
@@ -178,6 +178,29 @@ fn parse_assignment_target(
     }
 }
 
+fn parse_if_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<If> {
+    assert!(matches!(pair.as_rule(), Rule::if_expr) || matches!(pair.as_rule(), Rule::elseif));
+
+    let mut pairs = pair.clone().into_inner();
+    let condition = parse_expression(pairs.next().unwrap(), parser)?;
+    let body = parse_expr_body(pairs.next().unwrap(), parser)?;
+
+    let else_exprs = pairs
+        .map(|else_expr| {
+            Ok(match else_expr.as_rule() {
+                Rule::elseif => Else::ElseIf(parse_if_expr(else_expr, parser)?),
+                Rule::ifelse => Else::IfElse(parse_expr_body(
+                    else_expr.into_inner().next().unwrap(),
+                    parser,
+                )?),
+                _ => unreachable!(),
+            })
+        })
+        .collect::<ParseResult<Vec<_>>>()?;
+
+    Ok(If::new(condition, body, else_exprs))
+}
+
 fn parse_algebraic_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     parser
         .algebraic
@@ -217,7 +240,7 @@ fn parse_boolean_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<A
                 "Unexpected value in boolean expression",
             )),
         })
-        .map_prefix(|_, rhs| Ok(Ast::Boolean(Boolean::new_not(rhs?))))
+        .map_prefix(|_, rhs| Ok(Ast::Boolean(BooleanExpr::new_not(rhs?))))
         .map_infix(|lhs, op, rhs| {
             let op = match op.as_rule() {
                 Rule::AND => BoolOperator::And,
@@ -225,7 +248,7 @@ fn parse_boolean_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<A
                 _ => unreachable!(),
             };
 
-            Ok(Ast::Boolean(Boolean::new_in(lhs?, op, rhs?)))
+            Ok(Ast::Boolean(BooleanExpr::new_in(lhs?, op, rhs?)))
         })
         .parse(pair.into_inner())
 }
@@ -253,7 +276,7 @@ fn parse_comparison(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast
                 _ => unreachable!(),
             };
 
-            Ok(Ast::Boolean(Boolean::new_comp(lhs?, op, rhs?)))
+            Ok(Ast::Boolean(BooleanExpr::new_comp(lhs?, op, rhs?)))
         })
         .parse(pair.into_inner())
 }
@@ -357,10 +380,10 @@ pub(crate) enum Ast {
     FunctionDef(Function),
     Variable(Id),
     AncestorRef(AncestorRef),
-    If,
+    If(If),
     Repeat,
     Algebraic(Algebraic),
-    Boolean(Boolean),
+    Boolean(BooleanExpr),
     List(Rc<Vec<Self>>),
     ListIndex(ListIndex),
     PropertyCall(Box<Self>, Box<Self>),
@@ -425,6 +448,8 @@ impl Ast {
             Ast::Boolean(expr) => expr.eval(pair, context),
 
             Ast::StringExpr(exprs) => Self::eval_string_expr(exprs, pair, context),
+
+            Ast::If(if_expr) => if_expr.eval(pair, context),
 
             _ => todo!(),
         }
@@ -699,6 +724,71 @@ impl From<&AssignAncestor> for AncestorRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct If {
+    condition: Box<Ast>,
+    body: Body,
+    else_exprs: Rc<Vec<Else>>,
+}
+
+impl If {
+    fn new(condition: Ast, body: Body, else_exprs: Vec<Else>) -> Self {
+        Self {
+            condition: Box::new(condition),
+            body,
+            else_exprs: Rc::new(else_exprs),
+        }
+    }
+
+    fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        match self.condition.eval(pair, context.clone())? {
+            Value::Boolean(val) => {
+                if val {
+                    self.body.eval(pair, context)
+                } else {
+                    self.parse_else(pair, context)
+                }
+            }
+
+            _ => {
+                return Err(custom_error(
+                    pair,
+                    "Condition of 'if' statement must be a boolean",
+                ))
+            }
+        }
+    }
+
+    fn parse_else(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        for expr in self.else_exprs.iter() {
+            match expr {
+                Else::ElseIf(expr) => {
+                    let condition = expr.condition.eval(pair, context.clone())?;
+                    if matches!(condition, Value::Boolean(true)) {
+                        return expr.body.eval(pair, context);
+                    } else if matches!(condition, Value::Boolean(false)) {
+                        continue;
+                    } else {
+                        return Err(custom_error(
+                            pair,
+                            "Condition of 'if else' statement must be a boolean",
+                        ));
+                    }
+                }
+                Else::IfElse(body) => return body.eval(pair, context),
+            }
+        }
+
+        Ok(Value::Boolean(false))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Else {
+    ElseIf(If),
+    IfElse(Body),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Algebraic {
     Neg(Box<Ast>),
     In(AlgebraicIn),
@@ -760,13 +850,13 @@ pub(crate) enum MathOperator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Boolean {
+pub(crate) enum BooleanExpr {
     Not(Box<Ast>),
     In(BooleanIn),
     Comp(Comparison),
 }
 
-impl Boolean {
+impl BooleanExpr {
     pub(crate) fn new_not(expr: Ast) -> Self {
         Self::Not(Box::new(expr))
     }
@@ -853,7 +943,14 @@ impl Comparison {
             (Value::Number(lhs), Value::Number(rhs)) => compare!(lhs, rhs),
             (Value::String(lhs), Value::String(rhs)) => compare!(lhs, rhs),
             (Value::Boolean(lhs), Value::Boolean(rhs)) => compare!(lhs, rhs),
-            _ => Err(custom_error(pair, "Cannot compare types")),
+            (lhs, rhs) => Err(custom_error(
+                pair,
+                &format!(
+                    "Cannot compare '{}' with '{}'",
+                    lhs.ty_name(),
+                    rhs.ty_name()
+                ),
+            )),
         }
     }
 }
@@ -1779,7 +1876,7 @@ mod tests {
             "true && false",
             expression,
             parse_expression,
-            Ast::Boolean(Boolean::new_in(
+            Ast::Boolean(BooleanExpr::new_in(
                 Ast::Value(Value::Boolean(true)),
                 BoolOperator::And,
                 Ast::Value(Value::Boolean(false))
@@ -1790,7 +1887,7 @@ mod tests {
             "10 < 1",
             expression,
             parse_expression,
-            Ast::Boolean(Boolean::new_comp(
+            Ast::Boolean(BooleanExpr::new_comp(
                 Ast::Value(Value::Number(10.0)),
                 CompOperator::Lt,
                 Ast::Value(Value::Number(1.0))
@@ -1883,6 +1980,110 @@ mod tests {
             parse_expression,
             context.clone(),
             Value::String("1\\{2} \\{te} test 7 ".to_string())
+        );
+    }
+
+    #[test]
+    fn test_if_expr() {
+        parse_eq!(
+            r#"if true
+                1
+            else if true
+                2
+            else if false
+                3           
+            else
+                4"#,
+            expression,
+            parse_expression,
+            Ast::If(If::new(
+                Ast::Value(Value::Boolean(true)),
+                Body::new(vec![Ast::Value(Value::Number(1.0))]),
+                vec![
+                    Else::ElseIf(If::new(
+                        Ast::Value(Value::Boolean(true)),
+                        Body::new(vec![Ast::Value(Value::Number(2.0))]),
+                        vec![],
+                    )),
+                    Else::ElseIf(If::new(
+                        Ast::Value(Value::Boolean(false)),
+                        Body::new(vec![Ast::Value(Value::Number(3.0))]),
+                        vec![],
+                    )),
+                    Else::IfElse(Body::new(vec![Ast::Value(Value::Number(4.0))])),
+                ]
+            ))
+        );
+
+        let context = Context::default();
+
+        eval_eq!(
+            r#"if true
+                1
+            else if true
+                2
+            else if false
+                3           
+            else
+                4"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(1.0)
+        );
+
+        eval_eq!(
+            r#"if false
+                1
+            else if true
+                2
+            else if false
+                3           
+            else
+                4"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(2.0)
+        );
+
+        eval_eq!(
+            r#"if false
+                1
+            else if false
+                2
+            else if true
+                3           
+            else
+                4"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(3.0)
+        );
+
+        eval_eq!(
+            r#"if false
+                1
+            else if false
+                2
+            else if false
+                3           
+            else
+                4"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(4.0)
+        );
+
+        eval_eq!(
+            r#"if false
+                1"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Boolean(false)
         );
     }
 }
