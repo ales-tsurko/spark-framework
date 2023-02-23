@@ -79,8 +79,7 @@ call              = !{ property_call | ancestor_ref | list_index | fn_call | var
     ancestor_ref  = { "^" ~ (list_index | var_call) }
 
 node                  = !{ node_id ~ "from" ~ node_id ~ attributes? }
-    node_id           = ${ ID ~ (node_id_inner ~ ID?)? }
-        node_id_inner = !{ "{" ~ (NUMBER | STRING | call) ~ "}" }
+    node_id           = _{ ID | STRING }
     attributes        = ${ blank ~ PEEK_ALL ~ PUSH(INDENT) ~ attribute ~ (blank ~ PEEK_ALL ~ attribute)* ~ DROP }
     attribute         = !{ (METAKEY | KEY) ~ ":" ~ (attributes | expression) ~ INDENT? }
 

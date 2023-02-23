@@ -6,13 +6,13 @@ use indexmap::IndexMap;
 use pest::iterators::Pair;
 
 use crate::parser::context::Context;
-use crate::parser::value::{self, Attribute, Attributes, Id, Key, Object, Value};
+use crate::parser::value::{self, Attribute, Attributes, Id, Key, Node, NodeId, Object, Value};
 use crate::parser::SparkMLParser;
 use crate::parser::{custom_error, ParseResult, Rule, RESERVED_WORDS};
 
 pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     match pair.as_rule() {
-        Rule::node => todo!(),
+        Rule::node => parse_node(pair, parser),
         Rule::object => parse_object(pair, parser),
         Rule::assignment => parse_assignment(pair, parser),
         Rule::if_expr => Ok(Ast::If(parse_if_expr(pair, parser)?)),
@@ -36,6 +36,38 @@ pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> Pars
         ))),
         _ => unreachable!(),
     }
+}
+
+fn parse_node(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    let mut inner = pair.into_inner();
+
+    let name = parse_node_id(inner.next().unwrap(), parser)?;
+    let class = parse_node_id(inner.next().unwrap(), parser)?;
+    let attributes = match inner.next() {
+        Some(pair) => parse_attributes(pair, parser)?,
+        None => Attributes::default(),
+    };
+
+    Ok(Ast::Node(Node::new_default(name, class, attributes)))
+}
+
+fn parse_node_id(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<NodeId<Ast>> {
+    match pair.as_rule() {
+        Rule::ID => parse_id(pair).map(NodeId::Id),
+        Rule::STRING => parse_string_expr(pair, parser).map(|expr| NodeId::String(Box::new(expr))),
+        _ => unreachable!(),
+    }
+}
+
+fn parse_id(pair: Pair<Rule>) -> ParseResult<Id> {
+    let id: Id = pair.as_str().into();
+    if RESERVED_WORDS.contains(id.as_str()) {
+        return Err(custom_error(
+            &pair,
+            &format!("'{}' is a reserved keyword", id.as_str()),
+        ));
+    }
+    Ok(id)
 }
 
 fn parse_object(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
@@ -131,18 +163,7 @@ fn parse_assignment_target(
     parser: &SparkMLParser,
 ) -> ParseResult<AssignmentTarget> {
     match pair.as_rule() {
-        Rule::ID => {
-            // in contrast to other assignment targets, IDs can be undefined (we reference others
-            // instead)
-            let id: Id = pair.as_str().into();
-            if RESERVED_WORDS.contains(id.as_str()) {
-                return Err(custom_error(
-                    &pair,
-                    &format!("'{}' is a reserved keyword", id.as_str()),
-                ));
-            }
-            Ok(AssignmentTarget::Id(id))
-        }
+        Rule::ID => Ok(AssignmentTarget::Id(parse_id(pair)?)),
 
         Rule::assign_property => {
             let mut inner = pair.into_inner();
@@ -382,8 +403,9 @@ fn parse_string_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<As
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub(crate) enum Ast {
-    Assignment(Assignment),
+    Node(Node<Self, Object<Self>, Object<Self>>),
     Object(Object<Self>),
+    Assignment(Assignment),
     Value(Value),
     StringExpr(Rc<Vec<Self>>),
     FunctionCall(Id, Vec<Self>),
@@ -753,6 +775,8 @@ impl If {
 
     fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
         let context = Context::with_parent(caller_ctx.clone());
+        caller_ctx.vars().set_recursive(true);
+        caller_ctx.funcs().set_recursive(true);
 
         match self.condition.eval(pair, caller_ctx.clone())? {
             Value::Boolean(val) => {
@@ -1392,6 +1416,51 @@ mod tests {
         } else {
             panic!("Expected object");
         }
+    }
+
+    #[test]
+    fn test_node() {
+        parse_eq!(
+            r#"Node from Node"#,
+            expression,
+            parse_expression,
+            Ast::Node(Node::new_default(
+                NodeId::Id("Node".into()),
+                NodeId::Id("Node".into()),
+                Attributes::default()
+            ))
+        );
+
+        parse_eq!(
+            r#""N{ call }de" from Node"#,
+            expression,
+            parse_expression,
+            Ast::Node(Node::new_default(
+                NodeId::String(Box::new(Ast::StringExpr(Rc::new(vec![
+                    Ast::Value(Value::String("N".into())),
+                    Ast::Variable("call".into()),
+                    Ast::Value(Value::String("de".into()))
+                ])))),
+                NodeId::Id("Node".into()),
+                Attributes::default()
+            ))
+        );
+
+        parse_eq!(
+            r#"Node from Node
+                foo: 0"#,
+            expression,
+            parse_expression,
+            Ast::Node(Node::new_default(
+                NodeId::Id("Node".into()),
+                NodeId::Id("Node".into()),
+                [(
+                    Key::Key("foo".into()),
+                    Attribute::Value(Rc::new(Ast::Value(Value::Number(0.0).into()))),
+                )]
+                .into()
+            ))
+        );
     }
 
     #[test]
@@ -2164,13 +2233,8 @@ mod tests {
             parse_expression,
             context.clone()
         );
-        
-        eval_ok!(
-            "n = 0",
-            assignment,
-            parse_assignment,
-            context.clone()
-        );
+
+        eval_ok!("n = 0", assignment, parse_assignment, context.clone());
 
         eval_eq!(
             r#"repeat 10

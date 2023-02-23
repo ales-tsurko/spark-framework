@@ -3,8 +3,10 @@
 use std::cell::RefCell;
 use std::hash::Hash;
 use std::rc::Rc;
+use std::str::FromStr;
 
 use indexmap::IndexMap;
+use pest::error::Error as ParseError;
 use pest::iterators::Pair;
 
 use crate::parser::ast::{Ast, Body};
@@ -14,11 +16,11 @@ use crate::parser::{custom_error, ParseResult, Rule};
 #[derive(Debug, PartialEq, Clone)]
 #[non_exhaustive]
 pub(crate) enum Value {
-    Node,
-    Object(Object<Value>),
+    Node(Node<Self, Tween<Self>, Signal>),
+    Object(Object<Self>),
     String(String),
     Boolean(bool),
-    List(Rc<RefCell<Vec<Value>>>),
+    List(Rc<RefCell<Vec<Self>>>),
     Number(f64),
     GdValue(String),
     Function(Function),
@@ -27,7 +29,7 @@ pub(crate) enum Value {
 impl Value {
     pub(crate) fn ty_name(&self) -> &'static str {
         match self {
-            Self::Node => "Node",
+            Self::Node(_) => "Node",
             Self::Object(_) => "Object",
             Self::String(_) => "String",
             Self::Boolean(_) => "Boolean",
@@ -42,8 +44,8 @@ impl Value {
 impl ToString for Value {
     fn to_string(&self) -> String {
         match self {
-            Self::Node => todo!(),
-            Self::Object(obj) => obj.attributes().to_string(&mut vec![]),
+            Self::Node(node) => node.attributes.to_string(&mut vec![]),
+            Self::Object(obj) => obj.attributes.to_string(&mut vec![]),
             Self::String(s) => s.to_string(),
             Self::Boolean(b) => b.to_string(),
             Self::List(l) => l
@@ -84,6 +86,9 @@ impl_from!(
     Object<Value>,
     Object,
     //
+    Node<Value, Tween<Value>, Signal>,
+    Node,
+    //
     Function,
     Function
 );
@@ -97,6 +102,135 @@ impl From<&str> for Value {
 impl From<Vec<Value>> for Value {
     fn from(v: Vec<Value>) -> Self {
         Self::List(Rc::new(RefCell::new(v)))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Node<V, T, S> {
+    name: NodeId<V>,
+    class: NodeId<V>,
+    attributes: Rc<Attributes<V>>,
+    parent: Option<Rc<Self>>,
+    tweens: Rc<Vec<T>>,
+    signals: Rc<Vec<S>>,
+    context: Context,
+}
+
+impl<V, T, S> Node<V, T, S> {
+    pub(crate) fn new_default(
+        name: NodeId<V>,
+        class: NodeId<V>,
+        attributes: Attributes<V>,
+    ) -> Self {
+        Self {
+            name,
+            class,
+            attributes: Rc::new(attributes),
+            parent: None,
+            tweens: Rc::new(vec![]),
+            signals: Rc::new(vec![]),
+            context: Context::default(),
+        }
+    }
+}
+
+impl<V: PartialEq, T: PartialEq, S: PartialEq> PartialEq for Node<V, T, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.class == other.class
+            && self.attributes == other.attributes
+            && self.parent == other.parent
+            && self.tweens == other.tweens
+            && self.signals == other.signals
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NodeId<T> {
+    Id(Id),
+    String(Box<T>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Tween<T> {
+    attributes: Rc<Attributes<T>>,
+    method: String,
+    transition: Transition,
+    easing: Easing,
+    duration: f64,
+    delay: f64,
+    repeat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Signal {
+    source: String,
+    destination: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Transition {
+    Back,
+    Bounce,
+    Circ,
+    Cubic,
+    Elastic,
+    Expo,
+    Linear,
+    Quad,
+    Quart,
+    Quint,
+    Sine,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
+impl Transition {
+    pub(crate) fn from_str(s: &str, pair: &Pair<Rule>) -> ParseResult<Self> {
+        match s {
+            "back" => Ok(Self::Back),
+            "bounce" => Ok(Self::Bounce),
+            "circ" => Ok(Self::Circ),
+            "cubic" => Ok(Self::Cubic),
+            "elastic" => Ok(Self::Elastic),
+            "expo" => Ok(Self::Expo),
+            "linear" => Ok(Self::Linear),
+            "quad" => Ok(Self::Quad),
+            "quart" => Ok(Self::Quart),
+            "quint" => Ok(Self::Quint),
+            "sine" => Ok(Self::Sine),
+            _ => Err(custom_error(pair, &format!("Invalid transition '{}'", s))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Easing {
+    In,
+    Out,
+    InOut,
+    OutIn,
+}
+
+impl Default for Easing {
+    fn default() -> Self {
+        Self::InOut
+    }
+}
+
+impl Easing {
+    pub(crate) fn from_str(s: &str, pair: &Pair<Rule>) -> ParseResult<Self> {
+        match s {
+            "in" => Ok(Self::In),
+            "out" => Ok(Self::Out),
+            "inout" => Ok(Self::InOut),
+            "outin" => Ok(Self::OutIn),
+            _ => Err(custom_error(pair, &format!("Invalid easing '{}'", s))),
+        }
     }
 }
 
