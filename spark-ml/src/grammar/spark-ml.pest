@@ -50,7 +50,7 @@ if_expr    = !{ "if" ~ (bool_expr | BOOL | call) ~ body ~ elseif* ~ ifelse? }
     elseif = { NEWLINE+ ~ "else if" ~ (bool_expr | BOOL | call) ~ body }
     ifelse = { NEWLINE+ ~ "else" ~ body }
     
-repeat_expr = !{ "repeat" ~ (INT | call) ~ body }
+repeat_expr = !{ "repeat" ~ expression ~ body }
 
 body               = ${ blank ~ 
                             PEEK_ALL ~ PUSH(INDENT) ~ 

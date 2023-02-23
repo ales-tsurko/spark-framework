@@ -16,7 +16,7 @@ pub(crate) fn parse_expression(pair: Pair<Rule>, parser: &SparkMLParser) -> Pars
         Rule::object => parse_object(pair, parser),
         Rule::assignment => parse_assignment(pair, parser),
         Rule::if_expr => Ok(Ast::If(parse_if_expr(pair, parser)?)),
-        Rule::repeat_expr => todo!(),
+        Rule::repeat_expr => parse_repeat_expr(pair, parser),
         Rule::algebraic_expr => parse_algebraic_expr(pair, parser),
         Rule::bool_expr => parse_boolean_expr(pair, parser),
         Rule::call => parse_call(pair.into_inner().next().unwrap(), parser),
@@ -201,6 +201,16 @@ fn parse_if_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<If> {
     Ok(If::new(condition, body, else_exprs))
 }
 
+fn parse_repeat_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
+    assert!(matches!(pair.as_rule(), Rule::repeat_expr));
+
+    let mut pairs = pair.clone().into_inner();
+    let times = parse_expression(pairs.next().unwrap(), parser)?;
+    let body = parse_expr_body(pairs.next().unwrap(), parser)?;
+
+    Ok(Ast::Repeat(Repeat::new(times, body)))
+}
+
 fn parse_algebraic_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
     parser
         .algebraic
@@ -381,7 +391,7 @@ pub(crate) enum Ast {
     Variable(Id),
     AncestorRef(AncestorRef),
     If(If),
-    Repeat,
+    Repeat(Repeat),
     Algebraic(Algebraic),
     Boolean(BooleanExpr),
     List(Rc<Vec<Self>>),
@@ -450,6 +460,8 @@ impl Ast {
             Ast::StringExpr(exprs) => Self::eval_string_expr(exprs, pair, context),
 
             Ast::If(if_expr) => if_expr.eval(pair, context),
+
+            Ast::Repeat(repeat_expr) => repeat_expr.eval(pair, context),
 
             _ => todo!(),
         }
@@ -739,13 +751,15 @@ impl If {
         }
     }
 
-    fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
-        match self.condition.eval(pair, context.clone())? {
+    fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
+        let context = Context::with_parent(caller_ctx.clone());
+
+        match self.condition.eval(pair, caller_ctx.clone())? {
             Value::Boolean(val) => {
                 if val {
                     self.body.eval(pair, context)
                 } else {
-                    self.parse_else(pair, context)
+                    self.parse_else(pair, context, caller_ctx)
                 }
             }
 
@@ -758,11 +772,16 @@ impl If {
         }
     }
 
-    fn parse_else(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+    fn parse_else(
+        &self,
+        pair: &Pair<Rule>,
+        context: Context,
+        caller_ctx: Context,
+    ) -> ParseResult<Value> {
         for expr in self.else_exprs.iter() {
             match expr {
                 Else::ElseIf(expr) => {
-                    let condition = expr.condition.eval(pair, context.clone())?;
+                    let condition = expr.condition.eval(pair, caller_ctx.clone())?;
                     if matches!(condition, Value::Boolean(true)) {
                         return expr.body.eval(pair, context);
                     } else if matches!(condition, Value::Boolean(false)) {
@@ -786,6 +805,42 @@ impl If {
 pub(crate) enum Else {
     ElseIf(If),
     IfElse(Body),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Repeat {
+    times: Box<Ast>,
+    body: Body,
+}
+
+impl Repeat {
+    fn new(times: Ast, body: Body) -> Self {
+        Self {
+            times: Box::new(times),
+            body,
+        }
+    }
+
+    fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Value> {
+        let times = match self.times.eval(pair, caller_ctx.clone())? {
+            Value::Number(num) => num as usize,
+            _ => {
+                return Err(custom_error(
+                    pair,
+                    "The number of times to repeat must be a number",
+                ))
+            }
+        };
+
+        let context = Context::with_parent(caller_ctx.clone());
+        let mut result = Value::Boolean(false);
+
+        for _ in 0..times {
+            result = self.body.eval(pair, context.clone())?;
+        }
+
+        Ok(result)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2084,6 +2139,47 @@ mod tests {
             parse_expression,
             context.clone(),
             Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn test_repeat_expr() {
+        parse_eq!(
+            r#"repeat 10
+                1"#,
+            expression,
+            parse_expression,
+            Ast::Repeat(Repeat::new(
+                Ast::Value(Value::Number(10.0)),
+                Body::new(vec![Ast::Value(Value::Number(1.0))])
+            ))
+        );
+
+        let context = Context::default();
+
+        eval_err!(
+            r#"repeat true
+                1"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+        
+        eval_ok!(
+            "n = 0",
+            assignment,
+            parse_assignment,
+            context.clone()
+        );
+
+        eval_eq!(
+            r#"repeat 10
+                n = n + 1
+                n"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Number(10.0)
         );
     }
 }
