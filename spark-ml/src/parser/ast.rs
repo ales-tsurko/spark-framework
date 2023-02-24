@@ -1,12 +1,16 @@
 //! Abstract syntax tree.
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pest::iterators::Pair;
+use pest::Parser;
 
 use crate::parser::context::Context;
-use crate::parser::value::{self, Attribute, Attributes, Id, Key, Node, NodeId, Object, Value};
+use crate::parser::value::{
+    self, Attribute, Attributes, Easing, Id, Key, Node, Object, Signal, Transition, Tween, Value,
+};
 use crate::parser::SparkMLParser;
 use crate::parser::{custom_error, ParseResult, Rule, RESERVED_WORDS};
 
@@ -48,13 +52,17 @@ fn parse_node(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
         None => Attributes::default(),
     };
 
-    Ok(Ast::Node(Node::new_default(name, class, attributes)))
+    Ok(Ast::Node(Rc::new(Node::new_default(
+        name, class, attributes,
+    ))))
 }
 
-fn parse_node_id(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<NodeId<Ast>> {
+fn parse_node_id(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<NodeIdExpr> {
     match pair.as_rule() {
-        Rule::ID => parse_id(pair).map(NodeId::Id),
-        Rule::STRING => parse_string_expr(pair, parser).map(|expr| NodeId::String(Box::new(expr))),
+        Rule::ID => parse_id(pair).map(NodeIdExpr::Id),
+        Rule::STRING => {
+            parse_string_expr(pair, parser).map(|expr| NodeIdExpr::String(Box::new(expr)))
+        }
         _ => unreachable!(),
     }
 }
@@ -96,11 +104,11 @@ fn parse_object(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Ast> {
 
     let body = Body::new(properties?);
 
-    Ok(Ast::Object(Object::new(
-        Rc::new(attributes?),
+    Ok(Ast::Object(Rc::new(Object::new(
+        attributes?,
         body,
         Context::default(),
-    )))
+    ))))
 }
 
 fn parse_attributes(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<Attributes<Ast>> {
@@ -403,8 +411,8 @@ fn parse_string_expr(pair: Pair<Rule>, parser: &SparkMLParser) -> ParseResult<As
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub(crate) enum Ast {
-    Node(Node<Self, Object<Self>, Object<Self>>),
-    Object(Object<Self>),
+    Node(Rc<Node<NodeIdExpr, Self, PhantomData<Self>, PhantomData<Self>>>),
+    Object(Rc<Object<Self>>),
     Assignment(Assignment),
     Value(Value),
     StringExpr(Rc<Vec<Self>>),
@@ -434,7 +442,9 @@ impl Ast {
                 Ok(Value::Function(func))
             }
 
-            Ast::Object(object) => Ok(Value::Object(object.eval(pair, context)?)),
+            Ast::Node(node) => node.eval(pair, context).map(Value::Node),
+
+            Ast::Object(object) => object.eval(pair, context).map(Rc::new).map(Value::Object),
 
             Ast::PropertyCall(target, property) => {
                 if let Value::Object(obj) = target.eval(pair, context.clone())? {
@@ -507,6 +517,12 @@ impl Ast {
             })
             .map(Value::String)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NodeIdExpr {
+    Id(Id),
+    String(Box<Ast>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1044,6 +1060,198 @@ pub(crate) enum CompOperator {
     GtEq,
 }
 
+impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
+    pub(crate) fn eval(
+        &self,
+        pair: &Pair<Rule>,
+        caller_ctx: Context,
+    ) -> ParseResult<Rc<RefCell<Node<Id, Value, Tween<Value>, Signal>>>> {
+        let name = self.name().eval(pair, caller_ctx.clone())?;
+        let class = self.class().eval(pair, caller_ctx.clone())?;
+
+        let attributes = self.attributes().eval(pair, caller_ctx.clone())?;
+
+        dbg!(&attributes);
+
+        let tweens = attributes
+            .get("@tweens")
+            .map(|tweens| self.eval_list(tweens, pair))
+            .unwrap_or_else(|| Ok(vec![]))?
+            .iter()
+            .map(|val| self.eval_tween(val, pair))
+            .collect::<ParseResult<Vec<_>>>()?;
+
+        let signals = attributes
+            .get("@signals")
+            .map(|signals| self.eval_list(signals, pair))
+            .unwrap_or_else(|| Ok(vec![]))?
+            .iter()
+            .map(|val| self.eval_signal(val, pair))
+            .collect::<ParseResult<Vec<_>>>()?;
+
+        let node = Rc::new(RefCell::new(Node {
+            name,
+            class,
+            attributes,
+            tweens,
+            signals,
+            parent: None,
+        }));
+
+        let children = node
+            .borrow()
+            .attributes()
+            .get("@children")
+            .map(|children| self.eval_list(children, pair))
+            .unwrap_or_else(|| Ok(vec![]))?
+            .iter()
+            .map(|val| match val {
+                Value::Node(child) => {
+                    child.borrow_mut().set_parent(Rc::downgrade(&node));
+                    Ok(Value::Node(child.clone()))
+                }
+                _ => Err(custom_error(pair, "Expected a node")),
+            })
+            .collect::<ParseResult<Vec<_>>>()?;
+
+        if !children.is_empty() {
+            node.borrow_mut().set_children(children);
+        }
+
+        Ok(node)
+    }
+
+    fn eval_list(&self, attr: &Attribute<Value>, pair: &Pair<Rule>) -> ParseResult<Vec<Value>> {
+        match attr {
+            Attribute::Value(val) if matches!(val.as_ref(), Value::List(_)) => match val.as_ref() {
+                Value::List(list) => Ok(list.take()),
+                _ => unreachable!(),
+            },
+            _ => Err(custom_error(pair, "Expected a list")),
+        }
+    }
+
+    fn eval_tween(&self, value: &Value, pair: &Pair<Rule>) -> ParseResult<Tween<Value>> {
+        match value {
+            Value::Object(obj) => Tween::eval(obj, pair),
+            _ => Err(custom_error(pair, "Expected an object")),
+        }
+    }
+
+    fn eval_signal(&self, value: &Value, pair: &Pair<Rule>) -> ParseResult<Signal> {
+        match value {
+            Value::Object(obj) => Signal::eval(obj, pair),
+            _ => Err(custom_error(pair, "Expected an object")),
+        }
+    }
+}
+
+impl NodeIdExpr {
+    pub(crate) fn eval(&self, pair: &Pair<Rule>, caller_ctx: Context) -> ParseResult<Id> {
+        match self {
+            Self::Id(id) => Ok(id.clone()),
+            Self::String(expr) => self.eval_string_id(expr, pair, caller_ctx),
+        }
+    }
+
+    fn eval_string_id(
+        &self,
+        expr: &Ast,
+        pair: &Pair<Rule>,
+        caller_ctx: Context,
+    ) -> ParseResult<Id> {
+        match expr.eval(pair, caller_ctx)? {
+            Value::String(id) => SparkMLParser::parse(Rule::ID, id.as_str())
+                .map_err(Box::new)
+                .map(|_| Id::from(id.clone())),
+            _ => Err(custom_error(pair, "Expected a string")),
+        }
+    }
+}
+
+impl Tween<Value> {
+    pub(crate) fn eval(obj: &Object<Value>, pair: &Pair<Rule>) -> ParseResult<Self> {
+        let attrs = obj.attributes().clone();
+
+        if attrs.table().is_empty() {
+            return Err(custom_error(
+                pair,
+                "Tween should has at least one attribute",
+            ));
+        }
+
+        let method = attrs.get_required("@method", pair)?.get_as_string(pair)?;
+
+        let duration = attrs.get_required("@duration", pair)?.get_as_number(pair)?;
+
+        macro_rules! get_optional {
+            ($key:literal, $type:ty) => {
+                attrs
+                    .get_optional($key, pair)?
+                    .map(|val| match val {
+                        Value::String(string) => <$type>::from_str(string.as_str(), pair),
+                        _ => {
+                            return Err(custom_error(
+                                pair,
+                                &format!("Expected a string for '{}'", $key),
+                            ))
+                        }
+                    })
+                    .unwrap_or_else(|| Ok(Default::default()))?
+            };
+        }
+
+        macro_rules! get_optional_primitive {
+            ($key:literal, $expected:ident) => {
+                attrs
+                    .get_optional($key, pair)?
+                    .map(|val| match val {
+                        Value::$expected(val) => Ok(*val),
+                        _ => {
+                            return Err(custom_error(
+                                pair,
+                                &format!("Expected a string for '{}'", $key),
+                            ))
+                        }
+                    })
+                    .unwrap_or_else(|| Ok(Default::default()))?
+            };
+        }
+
+        let transition = get_optional!("@transition", Transition);
+        let easing = get_optional!("@easing", Easing);
+        let delay = get_optional_primitive!("@delay", Number);
+        let repeat = get_optional_primitive!("@repeat", Boolean);
+
+        Ok(Self {
+            attributes: Rc::new(attrs.table().clone().into()),
+            method,
+            duration,
+            transition,
+            easing,
+            delay,
+            repeat,
+        })
+    }
+}
+
+impl Signal {
+    pub(crate) fn eval(obj: &Object<Value>, pair: &Pair<Rule>) -> ParseResult<Self> {
+        let attrs = obj.attributes().clone();
+
+        let source = attrs.get_required("@source", pair)?.get_as_string(pair)?;
+
+        let destination = attrs
+            .get_required("@destination", pair)?
+            .get_as_string(pair)?;
+
+        Ok(Signal {
+            source,
+            destination,
+        })
+    }
+}
+
 impl Object<Ast> {
     pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Object<Value>> {
         let context = Context::with_parent(context);
@@ -1052,7 +1260,7 @@ impl Object<Ast> {
         context.funcs().set_recursive(false);
 
         let _ = self.body().eval(pair, context.clone())?;
-        let attributes = Rc::new(self.attributes().eval(pair, context.clone())?);
+        let attributes = self.attributes().eval(pair, context.clone())?;
         Ok(Object::new(attributes, self.body().clone(), context))
     }
 }
@@ -1367,22 +1575,20 @@ mod tests {
         if let Ast::Object(object) = expr.clone() {
             assert_eq!(object.attributes().table().len(), 3);
 
-            match object.attributes().get(&Key::Key("foo".into())) {
+            match object.attributes().get("foo") {
                 Some(Attribute::Value(value)) => {
                     assert!(matches!(value.as_ref(), &Ast::FunctionCall(_, _)));
                 }
                 _ => panic!("Expected value"),
             }
 
-            match object.attributes().get(&Key::Key("bar".into())) {
-                Some(Attribute::Attributes(attrs)) => {
-                    match attrs.get(&Key::MetaKey("@child".into())) {
-                        Some(Attribute::Value(value)) => {
-                            assert!(matches!(value.as_ref(), &Ast::Value(Value::Number(_))));
-                        }
-                        _ => panic!("Expected value"),
+            match object.attributes().get("bar") {
+                Some(Attribute::Attributes(attrs)) => match attrs.get("@child") {
+                    Some(Attribute::Value(value)) => {
+                        assert!(matches!(value.as_ref(), &Ast::Value(Value::Number(_))));
                     }
-                }
+                    _ => panic!("Expected value"),
+                },
                 _ => panic!("Expected value"),
             }
 
@@ -1410,7 +1616,7 @@ mod tests {
             assert_eq!(object.context().var(&"n".into()), Some(Value::Number(1.0)));
             assert_eq!(object.attributes().table().len(), 3);
             assert_eq!(
-                object.attributes().get(&Key::Key("foo".into())),
+                object.attributes().get("foo"),
                 Some(&Attribute::Value(Value::Number(1.0).into()))
             );
         } else {
@@ -1424,26 +1630,26 @@ mod tests {
             r#"Node from Node"#,
             expression,
             parse_expression,
-            Ast::Node(Node::new_default(
-                NodeId::Id("Node".into()),
-                NodeId::Id("Node".into()),
+            Ast::Node(Rc::new(Node::new_default(
+                NodeIdExpr::Id("Node".into()),
+                NodeIdExpr::Id("Node".into()),
                 Attributes::default()
-            ))
+            )))
         );
 
         parse_eq!(
             r#""N{ call }de" from Node"#,
             expression,
             parse_expression,
-            Ast::Node(Node::new_default(
-                NodeId::String(Box::new(Ast::StringExpr(Rc::new(vec![
+            Ast::Node(Rc::new(Node::new_default(
+                NodeIdExpr::String(Box::new(Ast::StringExpr(Rc::new(vec![
                     Ast::Value(Value::String("N".into())),
                     Ast::Variable("call".into()),
                     Ast::Value(Value::String("de".into()))
                 ])))),
-                NodeId::Id("Node".into()),
+                NodeIdExpr::Id("Node".into()),
                 Attributes::default()
-            ))
+            )))
         );
 
         parse_eq!(
@@ -1451,15 +1657,80 @@ mod tests {
                 foo: 0"#,
             expression,
             parse_expression,
-            Ast::Node(Node::new_default(
-                NodeId::Id("Node".into()),
-                NodeId::Id("Node".into()),
+            Ast::Node(Rc::new(Node::new_default(
+                NodeIdExpr::Id("Node".into()),
+                NodeIdExpr::Id("Node".into()),
                 [(
                     Key::Key("foo".into()),
                     Attribute::Value(Rc::new(Ast::Value(Value::Number(0.0).into()))),
                 )]
                 .into()
-            ))
+            )))
+        );
+
+        let context = Context::default();
+
+        eval_eq!(
+            r#"Node from Node
+                foo: 0"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Node {
+                name: "Node".into(),
+                class: "Node".into(),
+                attributes: [("foo".into(), Attribute::Value(Rc::new(0.0.into())))].into(),
+                parent: None,
+                tweens: vec![],
+                signals: vec![],
+            }
+            .into()
+        );
+
+        let expected: Rc<RefCell<Node<_, Value, _, _>>> = Rc::new(RefCell::new(Node {
+            name: "A".into(),
+            class: "A".into(),
+            attributes: Default::default(),
+            parent: None,
+            tweens: vec![],
+            signals: vec![],
+        }));
+
+        expected.borrow_mut().attributes.insert(
+            Key::from("@children"),
+            vec![
+                Node {
+                    name: "B".into(),
+                    class: "B".into(),
+                    attributes: Default::default(),
+                    parent: Some(Rc::downgrade(&expected)),
+                    tweens: vec![],
+                    signals: vec![],
+                }
+                .into(),
+                Node {
+                    name: "C".into(),
+                    class: "C".into(),
+                    attributes: Default::default(),
+                    parent: Some(Rc::downgrade(&expected)),
+                    tweens: vec![],
+                    signals: vec![],
+                }
+                .into(),
+            ]
+            .into(),
+        );
+
+        eval_eq!(
+            r#"A from A
+                @children: [
+                    B from B,
+                    C from C
+                ]"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            Value::Node(expected)
         );
     }
 

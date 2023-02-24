@@ -1,12 +1,9 @@
 //! Value is a concrete stateful data structure.
-
 use std::cell::RefCell;
 use std::hash::Hash;
-use std::rc::Rc;
-use std::str::FromStr;
+use std::rc::{Rc, Weak};
 
 use indexmap::IndexMap;
-use pest::error::Error as ParseError;
 use pest::iterators::Pair;
 
 use crate::parser::ast::{Ast, Body};
@@ -16,8 +13,8 @@ use crate::parser::{custom_error, ParseResult, Rule};
 #[derive(Debug, PartialEq, Clone)]
 #[non_exhaustive]
 pub(crate) enum Value {
-    Node(Node<Self, Tween<Self>, Signal>),
-    Object(Object<Self>),
+    Node(Rc<RefCell<Node<Id, Self, Tween<Self>, Signal>>>),
+    Object(Rc<Object<Self>>),
     String(String),
     Boolean(bool),
     List(Rc<RefCell<Vec<Self>>>),
@@ -44,7 +41,7 @@ impl Value {
 impl ToString for Value {
     fn to_string(&self) -> String {
         match self {
-            Self::Node(node) => node.attributes.to_string(&mut vec![]),
+            Self::Node(node) => node.borrow().attributes.to_string(&mut vec![]),
             Self::Object(obj) => obj.attributes.to_string(&mut vec![]),
             Self::String(s) => s.to_string(),
             Self::Boolean(b) => b.to_string(),
@@ -74,23 +71,10 @@ macro_rules! impl_from {
 }
 
 impl_from!(
-    String,
-    String,
-    //
-    bool,
-    Boolean,
-    //
-    f64,
-    Number,
-    //
-    Object<Value>,
-    Object,
-    //
-    Node<Value, Tween<Value>, Signal>,
-    Node,
-    //
-    Function,
-    Function
+    String, String, //
+    bool, Boolean, //
+    f64, Number, //
+    Function, Function
 );
 
 impl From<&str> for Value {
@@ -105,67 +89,108 @@ impl From<Vec<Value>> for Value {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct Node<V, T, S> {
-    name: NodeId<V>,
-    class: NodeId<V>,
-    attributes: Rc<Attributes<V>>,
-    parent: Option<Rc<Self>>,
-    tweens: Rc<Vec<T>>,
-    signals: Rc<Vec<S>>,
-    context: Context,
-}
-
-impl<V, T, S> Node<V, T, S> {
-    pub(crate) fn new_default(
-        name: NodeId<V>,
-        class: NodeId<V>,
-        attributes: Attributes<V>,
-    ) -> Self {
-        Self {
-            name,
-            class,
-            attributes: Rc::new(attributes),
-            parent: None,
-            tweens: Rc::new(vec![]),
-            signals: Rc::new(vec![]),
-            context: Context::default(),
-        }
+impl From<Node<Id, Value, Tween<Value>, Signal>> for Value {
+    fn from(node: Node<Id, Value, Tween<Value>, Signal>) -> Self {
+        Self::Node(Rc::new(RefCell::new(node)))
     }
 }
 
-impl<V: PartialEq, T: PartialEq, S: PartialEq> PartialEq for Node<V, T, S> {
+impl From<Object<Value>> for Value {
+    fn from(obj: Object<Value>) -> Self {
+        Self::Object(Rc::new(obj))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Node<I, V, T, S> {
+    pub(crate) name: I,
+    pub(crate) class: I,
+    pub(crate) attributes: Attributes<V>,
+    pub(crate) parent: Option<Weak<RefCell<Self>>>,
+    pub(crate) tweens: Vec<T>,
+    pub(crate) signals: Vec<S>,
+}
+
+impl<I, V, T, S> Node<I, V, T, S> {
+    pub(crate) fn new_default(name: I, class: I, attributes: Attributes<V>) -> Self {
+        Self {
+            name,
+            class,
+            attributes,
+            parent: None,
+            tweens: vec![],
+            signals: vec![],
+        }
+    }
+
+    pub(crate) fn name(&self) -> &I {
+        &self.name
+    }
+
+    pub(crate) fn class(&self) -> &I {
+        &self.class
+    }
+
+    pub(crate) fn attributes(&self) -> &Attributes<V> {
+        &self.attributes
+    }
+
+    pub(crate) fn set_parent(&mut self, parent: Weak<RefCell<Self>>) {
+        self.parent.replace(parent);
+    }
+}
+
+impl<I, T, S> Node<I, Value, T, S> {
+    pub(crate) fn set_children(&mut self, children: Vec<Value>) {
+        self.attributes.insert(
+            "@children",
+            Attribute::Value(Rc::new(Value::from(children))),
+        );
+    }
+}
+impl<I: PartialEq, V: PartialEq + Clone, T: PartialEq, S: PartialEq> PartialEq
+    for Node<I, V, T, S>
+{
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.class == other.class
             && self.attributes == other.attributes
-            && self.parent == other.parent
             && self.tweens == other.tweens
             && self.signals == other.signals
+            && match (&self.parent, &other.parent) {
+                (Some(p), Some(o)) => {
+                    let p = unsafe { &*p.as_ptr() }.borrow();
+                    let o = unsafe { &*o.as_ptr() }.borrow();
+                    // to prevent stack overflow caused by recursion, we need to compare attributes
+                    // without children
+                    let mut p_attrs = p.attributes.0.clone();
+                    let mut o_attrs = o.attributes.0.clone();
+                    p_attrs.remove(&Key::from("@children"));
+                    o_attrs.remove(&Key::from("@children"));
+
+                    p.name == o.name && p.class == o.class && p_attrs == o_attrs
+                }
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum NodeId<T> {
-    Id(Id),
-    String(Box<T>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Tween<T> {
-    attributes: Rc<Attributes<T>>,
-    method: String,
-    transition: Transition,
-    easing: Easing,
-    duration: f64,
-    delay: f64,
-    repeat: bool,
+    pub(crate) attributes: Rc<Attributes<T>>,
+    pub(crate) method: String,
+    pub(crate) duration: f64,
+    pub(crate) transition: Transition,
+    pub(crate) easing: Easing,
+    pub(crate) delay: f64,
+    pub(crate) repeat: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Signal {
-    source: String,
-    destination: String,
+    pub(crate) source: String,
+    pub(crate) destination: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -234,21 +259,21 @@ impl Easing {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Object<T> {
-    attributes: Rc<Attributes<T>>,
+    attributes: Attributes<T>,
     context: Context,
     body: Body,
 }
 
 impl<T: PartialEq> PartialEq for Object<T> {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.attributes, &other.attributes) && self.body == other.body
+        &self.attributes == &other.attributes && self.body == other.body
     }
 }
 
 impl<T> Object<T> {
-    pub(crate) fn new(attributes: Rc<Attributes<T>>, body: Body, context: Context) -> Self {
+    pub(crate) fn new(attributes: Attributes<T>, body: Body, context: Context) -> Self {
         Self {
             attributes,
             body,
@@ -271,6 +296,33 @@ impl<T> Object<T> {
 
 #[derive(Debug)]
 pub(crate) struct Attributes<T>(IndexMap<Key, Attribute<T>>);
+
+impl Attributes<Value> {
+    pub(crate) fn get_required<T: Into<Key> + ToString>(
+        &self,
+        key: T,
+        pair: &Pair<Rule>,
+    ) -> ParseResult<&Attribute<Value>> {
+        let key_str = key.to_string();
+        self.get(key)
+            .ok_or_else(|| custom_error(pair, &format!("'{}' is required", key_str)))
+    }
+
+    pub(crate) fn get_optional<T: Into<Key> + ToString>(
+        &self,
+        key: T,
+        pair: &Pair<Rule>,
+    ) -> ParseResult<Option<&Value>> {
+        let key_str = key.to_string();
+        self.get(key).map_or(Ok(None), |attr| match attr {
+            Attribute::Value(val) => Ok(Some(val)),
+            _ => Err(custom_error(
+                pair,
+                &format!("'{}' should be a value", key_str),
+            )),
+        })
+    }
+}
 
 impl<T: ToString> Attributes<T> {
     fn to_string(&self, indent: &mut Vec<String>) -> String {
@@ -311,13 +363,12 @@ impl<T> Attributes<T> {
         Self(table)
     }
 
-    pub(crate) fn insert(&mut self, key: Key, value: Attribute<T>) {
-        let _ = self.0.insert(key, value);
+    pub(crate) fn insert<K: Into<Key>>(&mut self, key: K, value: Attribute<T>) {
+        let _ = self.0.insert(key.into(), value);
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn get(&self, key: &Key) -> Option<&Attribute<T>> {
-        self.0.get(key)
+    pub(crate) fn get<K: Into<Key>>(&self, key: K) -> Option<&Attribute<T>> {
+        self.0.get(&key.into())
     }
 
     pub(crate) fn table(&self) -> &IndexMap<Key, Attribute<T>> {
@@ -370,6 +421,28 @@ impl From<&str> for Key {
 pub(crate) enum Attribute<T> {
     Value(Rc<T>),
     Attributes(Rc<Attributes<T>>),
+}
+
+impl Attribute<Value> {
+    pub(crate) fn get_as_string(&self, pair: &Pair<Rule>) -> ParseResult<String> {
+        match self {
+            Self::Value(val) if matches!(val.as_ref(), Value::String(_)) => match val.as_ref() {
+                Value::String(string) => Ok(string.clone()),
+                _ => unreachable!(),
+            },
+            _ => Err(custom_error(pair, "Expected a string")),
+        }
+    }
+
+    pub(crate) fn get_as_number(&self, pair: &Pair<Rule>) -> ParseResult<f64> {
+        match self {
+            Self::Value(val) if matches!(val.as_ref(), Value::Number(_)) => match val.as_ref() {
+                Value::Number(val) => Ok(*val),
+                _ => unreachable!(),
+            },
+            _ => Err(custom_error(pair, "Expected a number")),
+        }
+    }
 }
 
 impl<T: PartialEq> PartialEq for Attribute<T> {
