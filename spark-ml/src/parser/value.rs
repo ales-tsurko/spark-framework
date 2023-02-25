@@ -294,33 +294,36 @@ impl<T> Object<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Attributes<T>(IndexMap<Key, Attribute<T>>);
 
 impl Attributes<Value> {
-    pub(crate) fn get_required<T: Into<Key> + ToString>(
-        &self,
+    pub(crate) fn take_required<T: Into<Key> + ToString>(
+        &mut self,
         key: T,
         pair: &Pair<Rule>,
-    ) -> ParseResult<&Attribute<Value>> {
+    ) -> ParseResult<Attribute<Value>> {
         let key_str = key.to_string();
-        self.get(key)
+        self.0
+            .shift_remove(&key.into())
             .ok_or_else(|| custom_error(pair, &format!("'{}' is required", key_str)))
     }
 
-    pub(crate) fn get_optional<T: Into<Key> + ToString>(
-        &self,
+    pub(crate) fn take_optional<T: Into<Key> + ToString>(
+        &mut self,
         key: T,
         pair: &Pair<Rule>,
-    ) -> ParseResult<Option<&Value>> {
+    ) -> ParseResult<Option<Rc<Value>>> {
         let key_str = key.to_string();
-        self.get(key).map_or(Ok(None), |attr| match attr {
-            Attribute::Value(val) => Ok(Some(val)),
-            _ => Err(custom_error(
-                pair,
-                &format!("'{}' should be a value", key_str),
-            )),
-        })
+        self.0
+            .shift_remove(&key.into())
+            .map_or(Ok(None), |attr| match attr {
+                Attribute::Value(val) => Ok(Some(val)),
+                _ => Err(custom_error(
+                    pair,
+                    &format!("'{}' should be a value", key_str),
+                )),
+            })
     }
 }
 
@@ -369,6 +372,10 @@ impl<T> Attributes<T> {
 
     pub(crate) fn get<K: Into<Key>>(&self, key: K) -> Option<&Attribute<T>> {
         self.0.get(&key.into())
+    }
+
+    pub(crate) fn take<K: Into<Key>>(&mut self, key: K) -> Option<Attribute<T>> {
+        self.0.shift_remove(&key.into())
     }
 
     pub(crate) fn table(&self) -> &IndexMap<Key, Attribute<T>> {

@@ -4,8 +4,10 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use once_cell::sync::OnceCell;
 use pest::iterators::Pair;
 use pest::Parser;
+use regex::Regex;
 
 use crate::parser::context::Context;
 use crate::parser::value::{
@@ -1069,21 +1071,19 @@ impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
         let name = self.name().eval(pair, caller_ctx.clone())?;
         let class = self.class().eval(pair, caller_ctx.clone())?;
 
-        let attributes = self.attributes().eval(pair, caller_ctx.clone())?;
-
-        dbg!(&attributes);
+        let mut attributes = self.attributes().eval(pair, caller_ctx.clone())?;
 
         let tweens = attributes
-            .get("@tweens")
-            .map(|tweens| self.eval_list(tweens, pair))
+            .take("@tweens")
+            .map(|tweens| self.eval_list(&tweens, pair))
             .unwrap_or_else(|| Ok(vec![]))?
             .iter()
             .map(|val| self.eval_tween(val, pair))
             .collect::<ParseResult<Vec<_>>>()?;
 
         let signals = attributes
-            .get("@signals")
-            .map(|signals| self.eval_list(signals, pair))
+            .take("@signals")
+            .map(|signals| self.eval_list(&signals, pair))
             .unwrap_or_else(|| Ok(vec![]))?
             .iter()
             .map(|val| self.eval_signal(val, pair))
@@ -1161,9 +1161,16 @@ impl NodeIdExpr {
         caller_ctx: Context,
     ) -> ParseResult<Id> {
         match expr.eval(pair, caller_ctx)? {
-            Value::String(id) => SparkMLParser::parse(Rule::ID, id.as_str())
-                .map_err(Box::new)
-                .map(|_| Id::from(id.clone())),
+            Value::String(id) => {
+                static RE: OnceCell<Regex> = OnceCell::new();
+                let re = RE.get_or_init(|| Regex::new(r"^[^\d]\w+$").unwrap());
+
+                if !re.is_match(id.as_str()) {
+                    return Err(custom_error(pair, "Invalid ID"));
+                }
+
+                Ok(Id::from(id.clone()))
+            }
             _ => Err(custom_error(pair, "Expected a string")),
         }
     }
@@ -1171,7 +1178,7 @@ impl NodeIdExpr {
 
 impl Tween<Value> {
     pub(crate) fn eval(obj: &Object<Value>, pair: &Pair<Rule>) -> ParseResult<Self> {
-        let attrs = obj.attributes().clone();
+        let mut attrs = obj.attributes().clone();
 
         if attrs.table().is_empty() {
             return Err(custom_error(
@@ -1180,15 +1187,17 @@ impl Tween<Value> {
             ));
         }
 
-        let method = attrs.get_required("@method", pair)?.get_as_string(pair)?;
+        let method = attrs.take_required("@method", pair)?.get_as_string(pair)?;
 
-        let duration = attrs.get_required("@duration", pair)?.get_as_number(pair)?;
+        let duration = attrs
+            .take_required("@duration", pair)?
+            .get_as_number(pair)?;
 
         macro_rules! get_optional {
             ($key:literal, $type:ty) => {
                 attrs
-                    .get_optional($key, pair)?
-                    .map(|val| match val {
+                    .take_optional($key, pair)?
+                    .map(|val| match val.as_ref() {
                         Value::String(string) => <$type>::from_str(string.as_str(), pair),
                         _ => {
                             return Err(custom_error(
@@ -1204,8 +1213,8 @@ impl Tween<Value> {
         macro_rules! get_optional_primitive {
             ($key:literal, $expected:ident) => {
                 attrs
-                    .get_optional($key, pair)?
-                    .map(|val| match val {
+                    .take_optional($key, pair)?
+                    .map(|val| match val.as_ref() {
                         Value::$expected(val) => Ok(*val),
                         _ => {
                             return Err(custom_error(
@@ -1237,12 +1246,12 @@ impl Tween<Value> {
 
 impl Signal {
     pub(crate) fn eval(obj: &Object<Value>, pair: &Pair<Rule>) -> ParseResult<Self> {
-        let attrs = obj.attributes().clone();
+        let mut attrs = obj.attributes().clone();
 
-        let source = attrs.get_required("@source", pair)?.get_as_string(pair)?;
+        let source = attrs.take_required("@source", pair)?.get_as_string(pair)?;
 
         let destination = attrs
-            .get_required("@destination", pair)?
+            .take_required("@destination", pair)?
             .get_as_string(pair)?;
 
         Ok(Signal {
@@ -1259,7 +1268,10 @@ impl Object<Ast> {
         context.vars().set_recursive(false);
         context.funcs().set_recursive(false);
 
-        let _ = self.body().eval(pair, context.clone())?;
+        if !self.body().is_empty() {
+            let _ = self.body().eval(pair, context.clone())?;
+        }
+
         let attributes = self.attributes().eval(pair, context.clone())?;
         Ok(Object::new(attributes, self.body().clone(), context))
     }
@@ -1386,7 +1398,19 @@ impl Body {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.expressions.is_empty()
+    }
+
     pub(crate) fn eval(&self, pair: &Pair<Rule>, context: Context) -> ParseResult<Value> {
+        if self.is_empty() {
+            return Err(custom_error(pair, "Body should return an expression"));
+        }
+
+        if self.expressions.len() == 1 {
+            return self.expressions[0].eval(pair, context);
+        }
+
         let (last, rest) = self.expressions.split_last().unwrap();
 
         for expression in rest {
@@ -1490,10 +1514,10 @@ mod tests {
         ($code:literal, $rule:ident, $parse_func:ident, $context:expr) => {{
             let parser = SparkMLParser::default();
             let pair = parse!($code, $rule);
-            assert!($parse_func(pair.clone(), &parser)
+            $parse_func(pair.clone(), &parser)
                 .unwrap()
                 .eval(&pair, $context)
-                .is_ok());
+                .unwrap();
         }};
     }
 
@@ -1731,6 +1755,107 @@ mod tests {
             parse_expression,
             context.clone(),
             Value::Node(expected)
+        );
+
+        eval_ok!(
+            r#""Test{ "юникод" }" from A"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_ok!(
+            r#""Test{ 1 }" from A"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+
+        let expected = Node {
+            name: "A".into(),
+            class: "A".into(),
+            attributes: [(
+                "@attributes".into(),
+                Object::new(
+                    [("foo".into(), 0.0.into())].into(),
+                    Body::new(vec![]),
+                    Context::default(),
+                )
+                .into(),
+            )]
+            .into(),
+            parent: None,
+            tweens: vec![Tween {
+                attributes: Rc::new([("foo".into(), 1.0.into())].into()),
+                method: "tween_foo".to_string(),
+                duration: 1.0,
+                transition: Transition::Bounce,
+                easing: Easing::In,
+                delay: 0.0,
+                repeat: false,
+            }],
+            signals: vec![Signal {
+                source: String::from("A.click"),
+                destination: String::from("tween_foo"),
+            }],
+        };
+
+        eval_eq!(
+            r#"A from A
+                @tweens: [
+                    {
+                        foo: 1
+                        @method: "tween_foo"
+                        @duration: 1
+                        @transition: "bounce"
+                        @easing: "in"
+                    }
+                    ]
+                @signals: [
+                    {
+                        @source: "A.click"
+                        @destination: "tween_foo"
+                    }
+                    ]
+                @attributes: {
+                    foo: 0
+                }"#,
+            expression,
+            parse_expression,
+            context.clone(),
+            expected.into()
+        );
+
+        eval_err!(
+            r#"A from A
+                @children: [
+                    B from B,
+                    true
+                ]"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_err!(
+            r#""Test{ "@" }" from A"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_err!(
+            r#""1Test" from A"#,
+            expression,
+            parse_expression,
+            context.clone()
+        );
+
+        eval_err!(
+            r#""1" from A"#,
+            expression,
+            parse_expression,
+            context.clone()
         );
     }
 
