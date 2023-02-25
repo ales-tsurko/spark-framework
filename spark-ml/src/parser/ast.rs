@@ -6,7 +6,6 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use once_cell::sync::OnceCell;
 use pest::iterators::Pair;
-use pest::Parser;
 use regex::Regex;
 
 use crate::parser::context::Context;
@@ -1069,13 +1068,21 @@ impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
         caller_ctx: Context,
     ) -> ParseResult<Rc<RefCell<Node<Id, Value, Tween<Value>, Signal>>>> {
         let name = self.name().eval(pair, caller_ctx.clone())?;
+
+        if caller_ctx.has_node(&name) {
+            return Err(custom_error(
+                pair,
+                &format!("Node '{}' already defined in module", name.as_str()),
+            ));
+        }
+
         let class = self.class().eval(pair, caller_ctx.clone())?;
 
         let mut attributes = self.attributes().eval(pair, caller_ctx.clone())?;
 
         let tweens = attributes
             .take("@tweens")
-            .map(|tweens| self.eval_list(&tweens, pair))
+            .map(|tweens| self.eval_list(tweens, pair))
             .unwrap_or_else(|| Ok(vec![]))?
             .iter()
             .map(|val| self.eval_tween(val, pair))
@@ -1083,11 +1090,17 @@ impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
 
         let signals = attributes
             .take("@signals")
-            .map(|signals| self.eval_list(&signals, pair))
+            .map(|signals| self.eval_list(signals, pair))
             .unwrap_or_else(|| Ok(vec![]))?
             .iter()
             .map(|val| self.eval_signal(val, pair))
             .collect::<ParseResult<Vec<_>>>()?;
+
+        if let Some(meta_attrs) = attributes.take("@attributes") {
+            self.eval_meta_attrs(&mut attributes, &meta_attrs, pair)?;
+        }
+
+        let children = attributes.take("@children");
 
         let node = Rc::new(RefCell::new(Node {
             name,
@@ -1098,30 +1111,25 @@ impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
             parent: None,
         }));
 
-        let children = node
-            .borrow()
-            .attributes()
-            .get("@children")
+        caller_ctx.add_node(node.clone());
+
+        children
             .map(|children| self.eval_list(children, pair))
             .unwrap_or_else(|| Ok(vec![]))?
-            .iter()
-            .map(|val| match val {
+            .into_iter()
+            .try_for_each(|val| match val {
                 Value::Node(child) => {
-                    child.borrow_mut().set_parent(Rc::downgrade(&node));
-                    Ok(Value::Node(child.clone()))
+                    child.borrow_mut().set_parent(node.clone());
+                    caller_ctx.add_node(child);
+                    Ok(())
                 }
                 _ => Err(custom_error(pair, "Expected a node")),
-            })
-            .collect::<ParseResult<Vec<_>>>()?;
-
-        if !children.is_empty() {
-            node.borrow_mut().set_children(children);
-        }
+            })?;
 
         Ok(node)
     }
 
-    fn eval_list(&self, attr: &Attribute<Value>, pair: &Pair<Rule>) -> ParseResult<Vec<Value>> {
+    fn eval_list(&self, attr: Attribute<Value>, pair: &Pair<Rule>) -> ParseResult<Vec<Value>> {
         match attr {
             Attribute::Value(val) if matches!(val.as_ref(), Value::List(_)) => match val.as_ref() {
                 Value::List(list) => Ok(list.take()),
@@ -1143,6 +1151,26 @@ impl<T, S> Node<NodeIdExpr, Ast, PhantomData<T>, PhantomData<S>> {
             Value::Object(obj) => Signal::eval(obj, pair),
             _ => Err(custom_error(pair, "Expected an object")),
         }
+    }
+
+    fn eval_meta_attrs(
+        &self,
+        attributes: &mut Attributes<Value>,
+        meta_attrs: &Attribute<Value>,
+        pair: &Pair<Rule>,
+    ) -> ParseResult<()> {
+        let meta_attrs = match meta_attrs {
+            Attribute::Value(val) if matches!(val.as_ref(), Value::Object(_)) => match val.as_ref()
+            {
+                Value::Object(obj) => obj,
+                _ => unreachable!(),
+            },
+            _ => return Err(custom_error(pair, "Expected an object")),
+        };
+
+        attributes.extend(meta_attrs.attributes().clone());
+
+        Ok(())
     }
 }
 
@@ -1712,49 +1740,57 @@ mod tests {
         );
 
         let expected: Rc<RefCell<Node<_, Value, _, _>>> = Rc::new(RefCell::new(Node {
-            name: "A".into(),
-            class: "A".into(),
+            name: "Foo".into(),
+            class: "Foo".into(),
             attributes: Default::default(),
             parent: None,
             tweens: vec![],
             signals: vec![],
         }));
 
-        expected.borrow_mut().attributes.insert(
-            Key::from("@children"),
-            vec![
-                Node {
-                    name: "B".into(),
-                    class: "B".into(),
-                    attributes: Default::default(),
-                    parent: Some(Rc::downgrade(&expected)),
-                    tweens: vec![],
-                    signals: vec![],
-                }
-                .into(),
-                Node {
-                    name: "C".into(),
-                    class: "C".into(),
-                    attributes: Default::default(),
-                    parent: Some(Rc::downgrade(&expected)),
-                    tweens: vec![],
-                    signals: vec![],
-                }
-                .into(),
-            ]
-            .into(),
-        );
-
         eval_eq!(
-            r#"A from A
+            r#"Foo from Foo
                 @children: [
-                    B from B,
-                    C from C
+                    Bar from Bar,
+                    Baz from Baz
                 ]"#,
             expression,
             parse_expression,
             context.clone(),
-            Value::Node(expected)
+            Value::Node(expected.clone())
+        );
+
+        // the context should be updated with children
+        assert_eq!(
+            context.get_node(&"Bar".into()),
+            Some(Rc::new(RefCell::new(Node {
+                name: "Bar".into(),
+                class: "Bar".into(),
+                attributes: Default::default(),
+                parent: Some(expected.clone()),
+                tweens: vec![],
+                signals: vec![],
+            })))
+        );
+
+        assert_eq!(
+            context.get_node(&"Baz".into()),
+            Some(Rc::new(RefCell::new(Node {
+                name: "Baz".into(),
+                class: "Baz".into(),
+                attributes: Default::default(),
+                parent: Some(expected.clone()),
+                tweens: vec![],
+                signals: vec![],
+            })))
+        );
+
+        // redefining a node is not allowed
+        eval_err!(
+            r#"Foo from Foo"#,
+            expression,
+            parse_expression,
+            context.clone()
         );
 
         eval_ok!(
@@ -1774,16 +1810,7 @@ mod tests {
         let expected = Node {
             name: "A".into(),
             class: "A".into(),
-            attributes: [(
-                "@attributes".into(),
-                Object::new(
-                    [("foo".into(), 0.0.into())].into(),
-                    Body::new(vec![]),
-                    Context::default(),
-                )
-                .into(),
-            )]
-            .into(),
+            attributes: [("foo".into(), 0.0.into())].into(),
             parent: None,
             tweens: vec![Tween {
                 attributes: Rc::new([("foo".into(), 1.0.into())].into()),
@@ -1827,9 +1854,9 @@ mod tests {
         );
 
         eval_err!(
-            r#"A from A
+            r#"B from B
                 @children: [
-                    B from B,
+                    C from C,
                     true
                 ]"#,
             expression,

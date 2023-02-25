@@ -106,7 +106,7 @@ pub(crate) struct Node<I, V, T, S> {
     pub(crate) name: I,
     pub(crate) class: I,
     pub(crate) attributes: Attributes<V>,
-    pub(crate) parent: Option<Weak<RefCell<Self>>>,
+    pub(crate) parent: Option<Rc<RefCell<Self>>>,
     pub(crate) tweens: Vec<T>,
     pub(crate) signals: Vec<S>,
 }
@@ -135,19 +135,11 @@ impl<I, V, T, S> Node<I, V, T, S> {
         &self.attributes
     }
 
-    pub(crate) fn set_parent(&mut self, parent: Weak<RefCell<Self>>) {
+    pub(crate) fn set_parent(&mut self, parent: Rc<RefCell<Self>>) {
         self.parent.replace(parent);
     }
 }
 
-impl<I, T, S> Node<I, Value, T, S> {
-    pub(crate) fn set_children(&mut self, children: Vec<Value>) {
-        self.attributes.insert(
-            "@children",
-            Attribute::Value(Rc::new(Value::from(children))),
-        );
-    }
-}
 impl<I: PartialEq, V: PartialEq + Clone, T: PartialEq, S: PartialEq> PartialEq
     for Node<I, V, T, S>
 {
@@ -157,22 +149,7 @@ impl<I: PartialEq, V: PartialEq + Clone, T: PartialEq, S: PartialEq> PartialEq
             && self.attributes == other.attributes
             && self.tweens == other.tweens
             && self.signals == other.signals
-            && match (&self.parent, &other.parent) {
-                (Some(p), Some(o)) => {
-                    let p = unsafe { &*p.as_ptr() }.borrow();
-                    let o = unsafe { &*o.as_ptr() }.borrow();
-                    // to prevent stack overflow caused by recursion, we need to compare attributes
-                    // without children
-                    let mut p_attrs = p.attributes.0.clone();
-                    let mut o_attrs = o.attributes.0.clone();
-                    p_attrs.remove(&Key::from("@children"));
-                    o_attrs.remove(&Key::from("@children"));
-
-                    p.name == o.name && p.class == o.class && p_attrs == o_attrs
-                }
-                (None, None) => true,
-                _ => false,
-            }
+            && self.parent == other.parent
     }
 }
 
@@ -376,6 +353,10 @@ impl<T> Attributes<T> {
 
     pub(crate) fn take<K: Into<Key>>(&mut self, key: K) -> Option<Attribute<T>> {
         self.0.shift_remove(&key.into())
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.0.extend(other.0)
     }
 
     pub(crate) fn table(&self) -> &IndexMap<Key, Attribute<T>> {

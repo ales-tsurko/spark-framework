@@ -164,7 +164,7 @@ impl ExtResource {
     pub(crate) fn from_string_rule(pair: Pair<Rule>) -> ParseResult<Self> {
         let path = Path::new(pair.as_str());
         match path.extension() {
-            None => Err(custom_error(&pair, "Expected resource path.")),
+            None => Err(custom_error(&pair, "Expected resource path")),
             Some(ext) => match ext.to_str().unwrap() {
                 // list of supported image formats
                 // https://docs.godotengine.org/en/stable/tutorials/assets_pipeline/importing_images.html
@@ -173,7 +173,7 @@ impl ExtResource {
                 "gd" => Ok(ExtResource::GdScript(path.to_path_buf())),
                 Module::EXTENSION => Ok(ExtResource::Module(path.to_path_buf())),
                 "tscn" => Ok(ExtResource::Scene(path.to_path_buf())),
-                _ => Err(custom_error(&pair, "Unsupported resource type.")),
+                _ => Err(custom_error(&pair, "Unsupported resource type")),
             },
         }
     }

@@ -5,14 +5,25 @@ use std::rc::Rc;
 
 use pest::iterators::Pair;
 
-use crate::parser::value::{Function, Id, Value};
+use crate::parser::value::{Function, Id, Node, Signal, Tween, Value};
 use crate::parser::{custom_error, ParseResult, Rule};
 
 /// Context is a scoped storage for variables and functions.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Context {
     variables: Table<Value>,
     functions: Table<Function>,
+    nodes: Rc<RefCell<HashMap<Id, Rc<RefCell<Node<Id, Value, Tween<Value>, Signal>>>>>>,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            variables: Default::default(),
+            functions: Default::default(),
+            nodes: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
 }
 
 impl Context {
@@ -22,6 +33,7 @@ impl Context {
         Self {
             variables,
             functions,
+            nodes: parent.nodes.clone(),
         }
     }
 
@@ -31,6 +43,7 @@ impl Context {
         Some(Self {
             variables,
             functions,
+            nodes: self.nodes.clone(),
         })
     }
 
@@ -99,6 +112,23 @@ impl Context {
                 .as_ref()
                 .and_then(|parent| parent.find_var_ancestor(id))
         }
+    }
+
+    pub(crate) fn has_node(&self, id: &Id) -> bool {
+        self.nodes.borrow().contains_key(id)
+    }
+
+    pub(crate) fn add_node(&self, node: Rc<RefCell<Node<Id, Value, Tween<Value>, Signal>>>) {
+        let id = node.borrow().name.clone();
+        self.nodes.borrow_mut().insert(id, node);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_node(
+        &self,
+        id: &Id,
+    ) -> Option<Rc<RefCell<Node<Id, Value, Tween<Value>, Signal>>>> {
+        self.nodes.borrow().get(id).cloned()
     }
 }
 
